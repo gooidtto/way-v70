@@ -44,7 +44,7 @@ validate_topology
 xray run -test -config "$C"
 xray run -config "$C" & XP=$!; GP=""; CFP=""
 trap 'kill "$XP" "$GP" "$CFP" 2>/dev/null || true; wait "$XP" 2>/dev/null || true; wait "$GP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true' INT TERM EXIT
-waitp(){ p="$1";l="$2";i=0; while ! python3 -c 'import socket,sys;s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),1);s.close()' "$p" 2>/dev/null; do kill -0 "$XP" 2>/dev/null || return 1; i=$((i+1)); [ "$i" -lt "${READY_TIMEOUT:-120}" ] || { echo "FATAL: readiness timeout $l:$p" >&2; return 1; }; sleep 1; done; echo "READY_CHECK=$l:$p"; }
+waitp(){ p="$1";l="$2";i=0; while ! python3 -c 'import socket,sys;s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),1);s.close()' "$p" 2>/dev/null; do kill -0 "$XP" 2>/dev/null || return 1; i=$((i+1)); i=$((i)); [ "$i" -lt "${READY_TIMEOUT:-120}" ] || { echo "FATAL: readiness timeout $l:$p" >&2; return 1; }; sleep 1; done; echo "READY_CHECK=$l:$p"; }
 wait_base_routes(){
   for spec in $(python3 - "$R" <<'PY'
 import json,sys
@@ -115,34 +115,55 @@ PY
     if ! waitp "$CFPPORT" cloudflare-origin; then
       kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""; node4_fallback "cloudflare-origin-not-ready"
     else
-      # Token-managed tunnels take their published hostname -> origin mapping from the
-      # remote Cloudflare tunnel configuration. CLOUDFLARE_ORIGIN_SERVICE is only a local
-      # invariant and must never be treated as proof that the public route is correct.
-      if ! python3 - "$CF_HOST" "$CF_PATH" <<'PY'
-import socket,ssl,sys,base64,os
-host=sys.argv[1].strip(); path=sys.argv[2].strip() or '/'
+      # Do not use a plain TCP connect or a generic HTTP probe as proof of a
+      # published Cloudflare route. The probe must complete a WebSocket upgrade
+      # against the exact configured hostname/path and must preserve SNI.
+      CF_PROBE_RESULT=$(python3 - "$CF_HOST" "$CF_PATH" <<'PY'
+import base64,os,socket,ssl,sys
+host=sys.argv[1].strip().rstrip('.')
+path=sys.argv[2].strip() or '/'
 if not path.startswith('/'): path='/'+path
+key=base64.b64encode(os.urandom(16)).decode()
+req=(f'GET {path} HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nUser-Agent: way-v70-node4-gate/1\r\n\r\n').encode()
+last='probe-failed'
 try:
-    raw=socket.create_connection((host,443),timeout=8)
-    ctx=ssl.create_default_context(); s=ctx.wrap_socket(raw,server_hostname=host)
-    key=base64.b64encode(os.urandom(16)).decode()
-    req=(f'GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n').encode()
-    s.sendall(req); data=s.recv(4096); s.close()
-    ok=data.startswith(b'HTTP/1.1 101 ')
-    raise SystemExit(0 if ok else 1)
-except Exception:
-    raise SystemExit(1)
+    infos=socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)
+    for fam,typ,proto,canon,addr in infos:
+        try:
+            raw=socket.socket(fam,typ,proto);raw.settimeout(8);raw.connect(addr)
+            ctx=ssl.create_default_context();s=ctx.wrap_socket(raw,server_hostname=host);s.settimeout(8);s.sendall(req)
+            data=b''
+            while b'\r\n\r\n' not in data and len(data)<16384:
+                chunk=s.recv(4096)
+                if not chunk:break
+                data+=chunk
+            s.close()
+            head=data.split(b'\r\n\r\n',1)[0].decode('latin1','replace'); first=head.split('\r\n',1)[0] if head else ''
+            if first.startswith('HTTP/1.1 101 ') and 'upgrade: websocket' in head.lower():
+                print('PASS');raise SystemExit(0)
+            last=first or 'empty-response'
+        except Exception as e:
+            last=type(e).__name__+':'+str(e)[:120]
+except Exception as e:
+    last=type(e).__name__+':'+str(e)[:120]
+print('FAIL:'+last)
+raise SystemExit(1)
 PY
-      then
-        echo "CLOUDFLARE_PUBLIC_ROUTE=REACHABLE"
-        echo "NODE4_GATE=PASS"
-        echo "NODE4_ENABLED=true"
-        echo "TOPOLOGY=4"
-        echo "SUBSCRIPTION_COUNT=4"
-      else
-        echo "CLOUDFLARE_PUBLIC_ROUTE=UNVERIFIED" >&2
-        node4_fallback "cloudflare-public-route-unverified"
-      fi
+ 2>&1) || true
+      echo "CLOUDFLARE_PUBLIC_ROUTE_PROBE=$CF_PROBE_RESULT"
+      case "$CF_PROBE_RESULT" in
+        PASS)
+          echo "CLOUDFLARE_PUBLIC_ROUTE=REACHABLE"
+          echo "NODE4_GATE=PASS"
+          echo "NODE4_ENABLED=true"
+          echo "TOPOLOGY=4"
+          echo "SUBSCRIPTION_COUNT=4"
+          ;;
+        *)
+          kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""
+          node4_fallback "cloudflare-public-ws-probe-failed"
+          ;;
+      esac
     fi
   fi
 else
