@@ -17,6 +17,8 @@ CF_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN:-}"; CF_ID="${CLOUDFLARE_TUNNEL_ID:-}"; CF_H
 export DATA_DIR="$D" XRAY_CONFIG="$C" UUID PRIVATE_KEY="$PRIV" PUBLIC_KEY="$PUB" GATEWAY_PORT="$APP_PORT" RAILWAY_PUBLIC_DOMAIN="$PUBLIC" RAILWAY_TCP_PROXY_DOMAIN="$TCP_HOST" RAILWAY_TCP_PROXY_PORT="$TCP_PORT" RAILWAY_TCP_APPLICATION_PORT="$APP_PORT" XHTTP_PATH="${XHTTP_PATH:-/xhttp}" REALITY_RAW_SNI="${REALITY_RAW_SNI:-www.cloudflare.com}" REALITY_RAW_TARGET="${REALITY_RAW_TARGET:-www.cloudflare.com:443}" REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}" REALITY_XHTTP_SNI="${REALITY_XHTTP_SNI:-www.apple.com}" REALITY_XHTTP_TARGET="${REALITY_XHTTP_TARGET:-www.apple.com:443}" CLOUDFLARE_TUNNEL_TOKEN="$CF_TOKEN" CLOUDFLARE_TUNNEL_ID="$CF_ID" CLOUDFLARE_PUBLIC_HOSTNAME="$CF_HOST" CLOUDFLARE_ORIGIN_SERVICE="$CF_ORIGIN" WS_PORT="$CF_PORT" WS_PATH="$CF_PATH"
 python3 /opt/xray/scripts/generate.py
 R="$D/runtime.json"; [ -s "$R" ] || exit 1
+
+validate_topology(){
 python3 - "$C" "$D/subscription.txt" "$UUID" "$R" "$PUBLIC" "$TCP_HOST" "$TCP_PORT" "$APP_PORT" <<'PY'
 import json,re,sys
 from pathlib import Path
@@ -32,26 +34,61 @@ for i,line in enumerate(sub,1):
     host,port,q=m.group(2),m.group(3),m.group(4)
     if i==1 and (host!=public or port!='443'): raise SystemExit("FATAL: node1 Railway Public Domain mismatch")
     if i in (2,3) and (host!=tcp_host or port!=tcp_port): raise SystemExit(f"FATAL: node{i} Railway TCP endpoint mismatch")
-    if i==2 and 'sni=www.cloudflare.com' not in q: raise SystemExit("FATAL: node2 REALITY SNI mismatch")
-    if i==3 and 'sni=www.apple.com' not in q: raise SystemExit("FATAL: node3 XHTTP REALITY SNI mismatch")
+    if i==2 and ('sni='+urllib.parse.quote('www.cloudflare.com',safe='')) not in q: raise SystemExit("FATAL: node2 REALITY SNI mismatch")
+    if i==3 and ('sni='+urllib.parse.quote('www.apple.com',safe='')) not in q: raise SystemExit("FATAL: node3 XHTTP REALITY SNI mismatch")
     if i==4 and (not cf or host!=rt['cloudflare']['public_hostname'] or port!='443'): raise SystemExit("FATAL: node4 Cloudflare endpoint mismatch")
-print("TOPOLOGY_INVARIANT=OK"); print("UUID_INVARIANT=OK"); print("RAILWAY_NETWORKING_INVARIANT=OK"); print("RAILWAY_APPLICATION_PORT_INVARIANT=OK"); print("SUBSCRIPTION_COUNT="+str(n)); print("NODE_ORDER=01:RAILWAY_XHTTP,02:RAW_REALITY,03:XHTTP_REALITY"+(",04:CLOUDFLARE_WS" if cf else ""))
 PY
-xray run -test -config "$C"; xray run -config "$C" & XP=$!; GP=""; CFP=""
+}
+
+# urllib is intentionally imported by the validation snippet above.
+validate_topology
+xray run -test -config "$C"
+xray run -config "$C" & XP=$!; GP=""; CFP=""
 trap 'kill "$XP" "$GP" "$CFP" 2>/dev/null || true; wait "$XP" 2>/dev/null || true; wait "$GP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true' INT TERM EXIT
 waitp(){ p="$1";l="$2";i=0; while ! python3 -c 'import socket,sys;s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),1);s.close()' "$p" 2>/dev/null; do kill -0 "$XP" 2>/dev/null || exit 1; i=$((i+1)); [ "$i" -lt "${READY_TIMEOUT:-120}" ] || { echo "FATAL: readiness timeout $l:$p" >&2; exit 1; }; sleep 1; done; echo "READY_CHECK=$l:$p"; }
-for spec in $(python3 - "$R" <<'PY'
+wait_base_routes(){
+  for spec in $(python3 - "$R" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))
 for name,node in r['routes'].items(): print(f'{name}:{node["port"]}')
 PY
-); do waitp "${spec#*:}" "${spec%:*}"; done
-CF=$(python3 - "$R" <<'PY'
+  ); do waitp "${spec#*:}" "${spec%:*}"; done
+}
+
+# First bring up the generated topology. Node4 is only a candidate at this point.
+wait_base_routes
+python3 /opt/xray/scripts/gateway.py & GP=$!
+waitp "$APP_PORT" gateway
+
+CF_ENABLED=$(python3 - "$R" <<'PY'
 import json,sys; print('1' if json.load(open(sys.argv[1]))['cloudflare']['enabled'] else '0')
 PY
 )
-python3 /opt/xray/scripts/gateway.py & GP=$!; waitp "$APP_PORT" gateway
-if [ "$CF" = 1 ]; then
+
+node4_fallback(){
+  reason="$1"
+  echo "NODE4_GATE=FAIL"
+  echo "NODE4_FALLBACK_REASON=$reason"
+  kill "$GP" 2>/dev/null || true; wait "$GP" 2>/dev/null || true; GP=""
+  kill "$XP" 2>/dev/null || true; wait "$XP" 2>/dev/null || true; XP=""
+  export NODE4_FORCE_DISABLED=1
+  python3 /opt/xray/scripts/generate.py
+  unset NODE4_FORCE_DISABLED
+  R="$D/runtime.json"
+  validate_topology
+  xray run -test -config "$C"
+  xray run -config "$C" & XP=$!
+  wait_base_routes
+  python3 /opt/xray/scripts/gateway.py & GP=$!
+  waitp "$APP_PORT" gateway
+  CF_ENABLED=0
+  echo "NODE4_ENABLED=false"
+  echo "TOPOLOGY=3"
+  echo "SUBSCRIPTION_COUNT=3"
+  echo "NODE4_GATE=FALLBACK_3_NODE"
+}
+
+if [ "$CF_ENABLED" = 1 ]; then
   CFPPORT=$(python3 - "$R" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))['cloudflare']['ws_port'])
 PY
@@ -59,29 +96,53 @@ PY
   secret "$D/cloudflare_tunnel_token.txt" "$CF_TOKEN"
   cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:2000 run --token-file "$D/cloudflare_tunnel_token.txt" >"$D/cloudflared.log" 2>&1 & CFP=$!
   i=0
+  CF_READY=0
   while :; do
-    kill -0 "$CFP" 2>/dev/null || { tail -n 80 "$D/cloudflared.log" >&2 || true; exit 1; }
+    if ! kill -0 "$CFP" 2>/dev/null; then
+      CF_READY=0
+      break
+    fi
     if python3 - <<'PY' >/dev/null 2>&1
 import urllib.request
 u=urllib.request.urlopen('http://127.0.0.1:2000/metrics',timeout=1)
 s=u.read(200000).decode('utf-8','ignore')
 raise SystemExit(0 if 'cloudflared_' in s else 1)
 PY
-    then break; fi
-    i=$((i+1)); [ "$i" -lt "${CF_READY_TIMEOUT:-30}" ] || { echo "FATAL: Cloudflare tunnel metrics not ready" >&2; tail -n 80 "$D/cloudflared.log" >&2 || true; exit 1; }
+    then CF_READY=1; break; fi
+    i=$((i+1)); [ "$i" -lt "${CF_READY_TIMEOUT:-30}" ] || break
     sleep 1
   done
-  echo "CLOUDFLARE_TUNNEL_PROCESS=READY"
-  echo "CLOUDFLARE_PUBLIC_HOSTNAME=$CF_HOST"
-  echo "CLOUDFLARE_ORIGIN_SERVICE=$CF_ORIGIN"
-  echo "CLOUDFLARE_WS_ORIGIN=127.0.0.1:$CFPPORT"
-  waitp "$CFPPORT" cloudflare-origin
+  if [ "$CF_READY" != 1 ]; then
+    tail -n 80 "$D/cloudflared.log" >&2 || true
+    kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""
+    node4_fallback "cloudflared-not-ready"
+  else
+    echo "CLOUDFLARE_TUNNEL_PROCESS=READY"
+    echo "CLOUDFLARE_PUBLIC_HOSTNAME=$CF_HOST"
+    echo "CLOUDFLARE_ORIGIN_SERVICE=$CF_ORIGIN"
+    echo "CLOUDFLARE_WS_ORIGIN=127.0.0.1:$CFPPORT"
+    if ! waitp "$CFPPORT" cloudflare-origin; then
+      kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""
+      node4_fallback "cloudflare-origin-not-ready"
+    else
+      echo "NODE4_GATE=PASS"
+      echo "NODE4_ENABLED=true"
+      echo "TOPOLOGY=4"
+      echo "SUBSCRIPTION_COUNT=4"
+    fi
+  fi
+else
+  echo "NODE4_GATE=SKIP"
+  echo "NODE4_ENABLED=false"
+  echo "TOPOLOGY=3"
+  echo "SUBSCRIPTION_COUNT=3"
 fi
+
 printf 'https://%s/sub/%s\n' "$PUBLIC" "$TOKEN">"$D/subscription_url.txt"; chmod 600 "$D/subscription_url.txt"
 N=$(python3 - "$R" <<'PY'
 import json,sys; print(json.load(open(sys.argv[1]))['nodes']['count'])
 PY
 )
-echo "SOURCE_REPOSITORY=gooidtto/way-v70"; echo "SOURCE_BRANCH=main"; echo "RELEASE=$BUILD_ID"; echo "SOURCE_BUILD=$SOURCE_BUILD"; echo "RAILWAY_CURRENT_PUBLIC=$PUBLIC"; echo "RAILWAY_CURRENT_TCP=$TCP_HOST:$TCP_PORT"; echo "RAILWAY_CURRENT_APPLICATION_PORT=$APP_PORT"; echo "TOPOLOGY=$N"; echo "NODE4_ENABLED=$( [ "$CF" = 1 ] && echo true || echo false )"; echo "CLOUDFLARE=$( [ "$CF" = 1 ] && echo enabled || echo disabled )"; echo "SUBSCRIPTION_COUNT=$N"; echo "TOPOLOGY_INVARIANT=OK"; echo "NODE_ORDER=01:RAILWAY_XHTTP,02:RAW_REALITY,03:XHTTP_REALITY$( [ "$CF" = 1 ] && echo ',04:CLOUDFLARE_WS' || true )"
-while kill -0 "$XP" 2>/dev/null && kill -0 "$GP" 2>/dev/null; do if [ "$CF" = 1 ]; then kill -0 "$CFP" 2>/dev/null || exit 1; fi; sleep 5; done
+echo "SOURCE_REPOSITORY=gooidtto/way-v70"; echo "SOURCE_BRANCH=main"; echo "RELEASE=$BUILD_ID"; echo "SOURCE_BUILD=$SOURCE_BUILD"; echo "RAILWAY_CURRENT_PUBLIC=$PUBLIC"; echo "RAILWAY_CURRENT_TCP=$TCP_HOST:$TCP_PORT"; echo "RAILWAY_CURRENT_APPLICATION_PORT=$APP_PORT"; echo "TOPOLOGY=$N"; echo "NODE4_ENABLED=$( [ "$CF_ENABLED" = 1 ] && echo true || echo false )"; echo "CLOUDFLARE=$( [ "$CF_ENABLED" = 1 ] && echo enabled || echo disabled )"; echo "SUBSCRIPTION_COUNT=$N"; echo "NODE_ORDER=01:RAILWAY_XHTTP,02:RAW_REALITY,03:XHTTP_REALITY$( [ "$CF_ENABLED" = 1 ] && echo ',04:CLOUDFLARE_WS' || true )"
+while kill -0 "$XP" 2>/dev/null && kill -0 "$GP" 2>/dev/null; do if [ "$CF_ENABLED" = 1 ]; then kill -0 "$CFP" 2>/dev/null || exit 1; fi; sleep 5; done
 exit 1
