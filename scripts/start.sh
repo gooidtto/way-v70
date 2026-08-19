@@ -31,11 +31,11 @@ if not ids or any(x!=u for x in ids): raise SystemExit("FATAL: UUID invariant fa
 for i,line in enumerate(sub,1):
     m=re.match(r"vless://([^@]+)@([^:/?#]+):([0-9]+)\?(.*)",line)
     if not m or m.group(1)!=u: raise SystemExit(f"FATAL: node {i} syntax/UUID mismatch")
-    host,port,q=m.group(2),m.group(3),m.group(4)
+    host,port,q=m.group(2),m.group(3),m.group(4); uq=urllib.parse.unquote(q)
     if i==1 and (host!=public or port!='443'): raise SystemExit("FATAL: node1 Railway Public Domain mismatch")
     if i in (2,3) and (host!=tcp_host or port!=tcp_port): raise SystemExit(f"FATAL: node{i} Railway TCP endpoint mismatch")
-    if i==2 and 'sni=www.cloudflare.com' not in urllib.parse.unquote(q): raise SystemExit("FATAL: node2 REALITY SNI mismatch")
-    if i==3 and 'sni=www.apple.com' not in urllib.parse.unquote(q): raise SystemExit("FATAL: node3 XHTTP REALITY SNI mismatch")
+    if i==2 and 'sni=www.cloudflare.com' not in uq: raise SystemExit("FATAL: node2 REALITY SNI mismatch")
+    if i==3 and 'sni=www.apple.com' not in uq: raise SystemExit("FATAL: node3 XHTTP REALITY SNI mismatch")
     if i==4 and (not cf or host!=rt['cloudflare']['public_hostname'] or port!='443'): raise SystemExit("FATAL: node4 Cloudflare endpoint mismatch")
 PY
 }
@@ -94,8 +94,7 @@ PY
   )
   secret "$D/cloudflare_tunnel_token.txt" "$CF_TOKEN"
   cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:2000 run --token-file "$D/cloudflare_tunnel_token.txt" >"$D/cloudflared.log" 2>&1 & CFP=$!
-  i=0
-  CF_READY=0
+  i=0; CF_READY=0
   while :; do
     if ! kill -0 "$CFP" 2>/dev/null; then CF_READY=0; break; fi
     if python3 - <<'PY' >/dev/null 2>&1
@@ -106,33 +105,50 @@ PY
     then
       if grep -Eq 'Registered tunnel connection|tunnel connection.*registered' "$D/cloudflared.log" 2>/dev/null; then CF_READY=1; break; fi
     fi
-    i=$((i+1)); [ "$i" -lt "${CF_READY_TIMEOUT:-30}" ] || break
-    sleep 1
+    i=$((i+1)); [ "$i" -lt "${CF_READY_TIMEOUT:-30}" ] || break; sleep 1
   done
   if [ "$CF_READY" != 1 ]; then
-    tail -n 80 "$D/cloudflared.log" >&2 || true
-    kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""
+    tail -n 80 "$D/cloudflared.log" >&2 || true; kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""
     node4_fallback "cloudflared-tunnel-not-ready"
   else
-    echo "CLOUDFLARE_TUNNEL_PROCESS=READY"
-    echo "CLOUDFLARE_PUBLIC_HOSTNAME=$CF_HOST"
-    echo "CLOUDFLARE_ORIGIN_SERVICE=$CF_ORIGIN"
-    echo "CLOUDFLARE_WS_ORIGIN=127.0.0.1:$CFPPORT"
+    echo "CLOUDFLARE_TUNNEL_PROCESS=READY"; echo "CLOUDFLARE_PUBLIC_HOSTNAME=$CF_HOST"; echo "CLOUDFLARE_ORIGIN_SERVICE=$CF_ORIGIN"; echo "CLOUDFLARE_WS_ORIGIN=127.0.0.1:$CFPPORT"
     if ! waitp "$CFPPORT" cloudflare-origin; then
-      kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""
-      node4_fallback "cloudflare-origin-not-ready"
+      kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""; node4_fallback "cloudflare-origin-not-ready"
     else
-      echo "NODE4_GATE=PASS"
-      echo "NODE4_ENABLED=true"
-      echo "TOPOLOGY=4"
-      echo "SUBSCRIPTION_COUNT=4"
+      # A token-managed tunnel uses its remote Cloudflare ingress configuration; CLOUDFLARE_ORIGIN_SERVICE
+      # is only an invariant here and cannot configure that remote route. Verify the public hostname
+      # reaches Cloudflare without treating an HTTP status alone as proof of an origin connection.
+      if ! python3 - "$CF_HOST" "$CF_PATH" <<'PY'
+import socket,ssl,sys,os
+host=sys.argv[1].strip(); path=sys.argv[2].strip() or '/';
+if not path.startswith('/'): path='/'+path
+ctx=ssl.create_default_context(); ctx.check_hostname=True
+try:
+    raw=socket.create_connection((host,443),timeout=8)
+    s=ctx.wrap_socket(raw,server_hostname=host)
+    key='dGVzdGtleQ=='
+    req=(f'GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n').encode()
+    s.sendall(req); data=s.recv(4096)
+    s.close()
+    ok=data.startswith(b'HTTP/1.1 ') and b'\r\n' in data and not (b'502 Bad Gateway' in data or b'530 ' in data or b'1016' in data)
+    raise SystemExit(0 if ok else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+      then
+        echo "CLOUDFLARE_PUBLIC_ROUTE=REACHABLE"
+        echo "NODE4_GATE=PASS"
+        echo "NODE4_ENABLED=true"
+        echo "TOPOLOGY=4"
+        echo "SUBSCRIPTION_COUNT=4"
+      else
+        echo "CLOUDFLARE_PUBLIC_ROUTE=UNVERIFIED" >&2
+        node4_fallback "cloudflare-public-route-unverified"
+      fi
     fi
   fi
 else
-  echo "NODE4_GATE=SKIP"
-  echo "NODE4_ENABLED=false"
-  echo "TOPOLOGY=3"
-  echo "SUBSCRIPTION_COUNT=3"
+  echo "NODE4_GATE=SKIP"; echo "NODE4_ENABLED=false"; echo "TOPOLOGY=3"; echo "SUBSCRIPTION_COUNT=3"
 fi
 
 printf 'https://%s/sub/%s\n' "$PUBLIC" "$TOKEN">"$D/subscription_url.txt"; chmod 600 "$D/subscription_url.txt"
@@ -142,12 +158,7 @@ PY
 )
 echo "SOURCE_REPOSITORY=gooidtto/way-v70"; echo "SOURCE_BRANCH=main"; echo "RELEASE=$BUILD_ID"; echo "SOURCE_BUILD=$SOURCE_BUILD"; echo "RAILWAY_CURRENT_PUBLIC=$PUBLIC"; echo "RAILWAY_CURRENT_TCP=$TCP_HOST:$TCP_PORT"; echo "RAILWAY_CURRENT_APPLICATION_PORT=$APP_PORT"; echo "TOPOLOGY=$N"; echo "NODE4_ENABLED=$( [ "$CF_ENABLED" = 1 ] && echo true || echo false )"; echo "CLOUDFLARE=$( [ "$CF_ENABLED" = 1 ] && echo enabled || echo disabled )"; echo "SUBSCRIPTION_COUNT=$N"; echo "NODE_ORDER=01:RAILWAY_XHTTP,02:RAW_REALITY,03:XHTTP_REALITY$( [ "$CF_ENABLED" = 1 ] && echo ',04:CLOUDFLARE_WS' || true )"
 while :; do
-  kill -0 "$XP" 2>/dev/null || exit 1
-  kill -0 "$GP" 2>/dev/null || exit 1
-  if [ "$CF_ENABLED" = 1 ]; then
-    if ! kill -0 "$CFP" 2>/dev/null; then
-      node4_fallback "cloudflared-exited-after-pass"
-    fi
-  fi
+  kill -0 "$XP" 2>/dev/null || exit 1; kill -0 "$GP" 2>/dev/null || exit 1
+  if [ "$CF_ENABLED" = 1 ] && ! kill -0 "$CFP" 2>/dev/null; then node4_fallback "cloudflared-exited-after-pass"; fi
   sleep 5
 done
