@@ -31,6 +31,5 @@ ENV BUILD_ID=way-v70-standard-core \
     GATEWAY_MAX_INITIAL=131072 \
     GATEWAY_LOGLEVEL=WARNING
 RUN echo "SOURCE_BUILD=${SOURCE_BUILD} BUILD_ID=${BUILD_ID}" && sha256sum /opt/xray/scripts/generate.py /opt/xray/scripts/start.sh /opt/xray/scripts/gateway.py
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 CMD ["python3", "-c", "import os,urllib.request; p=os.environ.get('RAILWAY_TCP_APPLICATION_PORT'); p and urllib.request.urlopen('http://127.0.0.1:'+p+'/ready', timeout=8).read() or (_ for _ in ()).throw(SystemExit(1))"]
 WORKDIR /opt/xray
 ENTRYPOINT ["/opt/xray/scripts/guard.sh"]
