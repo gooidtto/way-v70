@@ -17,6 +17,14 @@ def http_routes():
 def tls_routes():
     _,rs=routes();return {v["sni"].lower().rstrip("."):("127.0.0.1",int(v["port"]),k) for k,v in rs.items() if v.get("sni") and v.get("port")}
 
+def http_route(path):
+    rs=http_routes()
+    exact=rs.get(path)
+    if exact:return exact
+    matches=[(base,route) for base,route in rs.items() if path.startswith(base.rstrip("/")+"/")]
+    if not matches:return None
+    return max(matches,key=lambda x:len(x[0]))[1]
+
 def ready(p):
     try:
         with socket.create_connection(("127.0.0.1",p),timeout=1.5):return True
@@ -124,7 +132,7 @@ async def http(reader,writer,data):
         payload,status=subscription(urllib.parse.unquote(m.group(1)));await response(writer,b"200 OK" if payload else (b"404 Not Found" if status=="TOKEN_INVALID" else b"500 Internal Server Error"),b"" if method=="HEAD" and payload else (payload or (status+"\n").encode()));return
     if method in ("GET","HEAD") and path in ("/","/index.html"):
         body=SITE.read_bytes();await response(writer,b"200 OK",b"" if method=="HEAD" else body,b"text/html; charset=utf-8");return
-    route=http_routes().get(path)
+    route=http_route(path)
     if not route:
         log.warning("ROUTE_REJECT http_path=%s",path);await response(writer,b"404 Not Found",b"not found\n");return
     await relay(reader,writer,data,route[:2],route[2])
