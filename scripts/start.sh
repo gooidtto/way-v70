@@ -57,8 +57,11 @@ if [ "$CF_ENABLED" = 1 ]; then
  if [ "$ok" != 1 ]; then tail -n 80 "$D/cloudflared.log" >&2 || true; fallback cloudflared-tunnel-not-ready
  else
   echo 'CLOUDFLARE_TUNNEL_PROCESS=READY'; echo "CLOUDFLARE_PUBLIC_HOSTNAME=$CF_HOST"; echo "CLOUDFLARE_ORIGIN_SERVICE=$CF_ORIGIN"; echo "CLOUDFLARE_WS_ORIGIN=127.0.0.1:$CF_PORT"
-  waitp "$CF_PORT" cloudflare-origin || { fallback cloudflare-origin-not-ready; }
-  echo 'NODE4_GATE=PASS'; echo 'NODE4_ENABLED=true'; echo 'TOPOLOGY=4'; echo 'SUBSCRIPTION_COUNT=4'
+  if waitp "$CF_PORT" cloudflare-origin; then
+   echo 'NODE4_GATE=PASS'; echo 'NODE4_ENABLED=true'; echo 'TOPOLOGY=4'; echo 'SUBSCRIPTION_COUNT=4'
+  else
+   fallback cloudflare-origin-not-ready
+  fi
  fi
 else echo 'NODE4_GATE=SKIP'; echo 'NODE4_ENABLED=false'; echo 'TOPOLOGY=3'; echo 'SUBSCRIPTION_COUNT=3'; fi
 printf 'https://%s/sub/%s\n' "$PUBLIC" "$TOKEN" >"$D/subscription_url.txt"; chmod 600 "$D/subscription_url.txt"
