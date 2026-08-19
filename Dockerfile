@@ -7,17 +7,14 @@ FROM python:3.12-alpine3.22
 ARG XRAY_VERSION
 ARG CLOUDFLARED_VERSION
 ENV XRAY_VERSION=${XRAY_VERSION} CLOUDFLARED_VERSION=${CLOUDFLARED_VERSION} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-RUN apk add --no-cache openssl ca-certificates && mkdir -p /etc/xray /data /opt/xray/scripts /opt/xray/config /opt/xray/site
+RUN apk add --no-cache openssl ca-certificates && mkdir -p /etc/xray /data /opt/xray/scripts /opt/xray/site
 COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
 COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 COPY scripts/ /opt/xray/scripts/
-COPY config/ /opt/xray/config/
 COPY site/ /opt/xray/site/
-RUN chmod 0755 /usr/local/bin/xray /usr/local/bin/cloudflared /opt/xray/scripts/*.sh /opt/xray/scripts/*.py && chmod 0644 /opt/xray/config/* /opt/xray/site/*
+RUN chmod 0755 /usr/local/bin/xray /usr/local/bin/cloudflared /opt/xray/scripts/*.sh /opt/xray/scripts/*.py && chmod 0644 /opt/xray/site/*
 ENV BUILD_ID=way-v70-standard-core \
     SOURCE_BUILD=way-v70-standard-core \
-    PORT=8080 \
-    GATEWAY_PORT=8080 \
     XRAY_CONFIG=/etc/xray/config.json \
     DATA_DIR=/data \
     REALITY_RAW_SNI=www.cloudflare.com \
@@ -34,7 +31,6 @@ ENV BUILD_ID=way-v70-standard-core \
     GATEWAY_MAX_INITIAL=131072 \
     GATEWAY_LOGLEVEL=WARNING
 RUN echo "SOURCE_BUILD=${SOURCE_BUILD} BUILD_ID=${BUILD_ID}" && sha256sum /opt/xray/scripts/generate.py /opt/xray/scripts/start.sh /opt/xray/scripts/gateway.py
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=8).read()"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 CMD-SHELL python3 -c "import os,urllib.request; p=os.environ.get('RAILWAY_TCP_APPLICATION_PORT') or os.environ.get('GATEWAY_PORT'); urllib.request.urlopen('http://127.0.0.1:'+p+'/ready', timeout=8).read()" || exit 1
 WORKDIR /opt/xray
 ENTRYPOINT ["/opt/xray/scripts/guard.sh"]
