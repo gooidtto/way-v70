@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio,base64,json,logging,os,re,socket,struct,urllib.parse
 from pathlib import Path
+
 PORT=int(os.environ.get("GATEWAY_PORT","8080"));D=Path(os.environ.get("DATA_DIR","/data"));SITE=Path("/opt/xray/site/index.html");TOKEN=D/"subscription_token.txt";SUB=D/"subscription.txt";RUNTIME=D/"runtime.json"
 MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","20")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(8192,int(os.environ.get("GATEWAY_MAX_INITIAL","131072"))))
 SEM=asyncio.Semaphore(MAX_CONNECTIONS);INIT_SEM=asyncio.Semaphore(max(32,MAX_CONNECTIONS*2));HTTP_METHODS=(b"GET ",b"POST ",b"HEAD ",b"PUT ",b"OPTIONS ",b"PATCH ",b"DELETE ",b"PRI * HTTP/2.0")
@@ -18,8 +19,7 @@ def tls_routes():
     _,rs=routes();return {v["sni"].lower().rstrip("."):("127.0.0.1",int(v["port"]),k) for k,v in rs.items() if v.get("sni") and v.get("port")}
 
 def http_route(path):
-    rs=http_routes()
-    exact=rs.get(path)
+    rs=http_routes();exact=rs.get(path)
     if exact:return exact
     matches=[(base,route) for base,route in rs.items() if path.startswith(base.rstrip("/")+"/")]
     if not matches:return None
@@ -48,12 +48,21 @@ def parse_sni(h):
         if len(h)<4 or h[0]!=1:return None
         end=4+int.from_bytes(h[1:4],"big")
         if end>len(h):return None
-        p=38;p+=1+h[p];cl=struct.unpack("!H",h[p:p+2])[0];p+=2+cl;p+=1+h[p];el=struct.unpack("!H",h[p:p+2])[0];p+=2;stop=p+el
+        p=38
+        if p>=end:return None
+        sid_len=h[p];p+=1+sid_len
+        if p+2>end:return None
+        cipher_len=struct.unpack("!H",h[p:p+2])[0];p+=2+cipher_len
+        if p>=end:return None
+        comp_len=h[p];p+=1+comp_len
+        if p+2>end:return None
+        ext_len=struct.unpack("!H",h[p:p+2])[0];p+=2;stop=min(end,p+ext_len)
         while p+4<=stop:
             typ,ln=struct.unpack("!HH",h[p:p+4]);p+=4
             if p+ln>stop:return None
             if typ==0 and ln>=5:
                 q=p+2;e=p+ln
+                if q>e:return None
                 while q+3<=e:
                     nt=h[q];nl=struct.unpack("!H",h[q+1:q+3])[0];q+=3
                     if q+nl>e:return None
@@ -67,7 +76,7 @@ def tls_sni(buf):
     pos=0;hs=bytearray()
     while pos+5<=len(buf):
         typ=buf[pos];ln=struct.unpack("!H",buf[pos+3:pos+5])[0]
-        if buf[pos+1]!=3 or buf[pos+2] not in (0,1,2,3,4):return None
+        if buf[pos+1]!=3 or buf[pos+2]>4:return None
         if pos+5+ln>len(buf):break
         if typ==22:
             hs.extend(buf[pos+5:pos+5+ln])
@@ -79,15 +88,31 @@ def tls_sni(buf):
         pos+=5+ln
     return None
 
+def tls_route_from_raw(buf):
+    rs=tls_routes()
+    s=tls_sni(buf)
+    if s and s in rs:return rs[s],s,"parser"
+    # REALITY ClientHello keeps SNI in plaintext. If record/handshake fragmentation
+    # prevents the strict parser from decoding it, match only configured route names.
+    lower=buf.lower()
+    for name,route in rs.items():
+        needle=name.encode("idna")
+        if needle in lower:return route,name,"raw-sni"
+    return None,s,"none"
+
 async def initial(reader):
     buf=bytearray();deadline=asyncio.get_running_loop().time()+READ_TIMEOUT
     while len(buf)<MAX_INITIAL:
-        try:chunk=await asyncio.wait_for(reader.read(min(8192,MAX_INITIAL-len(buf))),max(.1,deadline-asyncio.get_running_loop().time()))
+        remaining=deadline-asyncio.get_running_loop().time()
+        if remaining<=0:break
+        try:chunk=await asyncio.wait_for(reader.read(min(8192,MAX_INITIAL-len(buf))),max(.1,remaining))
         except asyncio.TimeoutError:break
         if not chunk:break
         buf.extend(chunk);b=bytes(buf)
         if b.startswith(HTTP_METHODS) and (b"\r\n\r\n" in b or len(b)>=8192):return b
-        if len(b)>=5 and b[:2]==b"\x16\x03" and tls_sni(b):return b
+        if len(b)>=5 and b[:2]==b"\x16\x03":
+            route,sni,method=tls_route_from_raw(b)
+            if route:return b
         if b[:1]!=b"\x16":return b
     return bytes(buf)
 
@@ -132,31 +157,35 @@ async def http(reader,writer,data):
         payload,status=subscription(urllib.parse.unquote(m.group(1)));await response(writer,b"200 OK" if payload else (b"404 Not Found" if status=="TOKEN_INVALID" else b"500 Internal Server Error"),b"" if method=="HEAD" and payload else (payload or (status+"\n").encode()));return
     if method in ("GET","HEAD") and path in ("/","/index.html"):
         body=SITE.read_bytes();await response(writer,b"200 OK",b"" if method=="HEAD" else body,b"text/html; charset=utf-8");return
-    route=http_route(path)
-    if not route:
+    mroute=http_route(path)
+    if not mroute:
         log.warning("ROUTE_REJECT http_path=%s",path);await response(writer,b"404 Not Found",b"not found\n");return
-    await relay(reader,writer,data,route[:2],route[2])
+    await relay(reader,writer,data,mroute[:2],mroute[2])
 
 async def handle(reader,writer):
+    peer=writer.get_extra_info("peername");
     try:
         async with INIT_SEM:data=await initial(reader)
         if not data:return
+        log.info("INCOMING peer=%s first=0x%s bytes=%d",peer,data[:1].hex() if data else "-",len(data))
         if data.startswith(HTTP_METHODS):
             async with SEM:await http(reader,writer,data);return
         if data[:2]==b"\x16\x03":
-            sni=tls_sni(data);route=tls_routes().get(sni or "")
+            route,sni,method=tls_route_from_raw(data)
+            log.info("TLS_ROUTE_DETECT peer=%s sni=%s method=%s",peer,sni or "-",method)
             if route:
                 async with SEM:await relay(reader,writer,data,route[:2],route[2])
-            else:log.warning("ROUTE_REJECT tls_sni=%s",sni or "-")
+            else:log.warning("ROUTE_REJECT tls_sni=%s peer=%s",sni or "-",peer)
             return
-        log.warning("ROUTE_REJECT protocol=0x%s",data[:1].hex() if data else "-")
-    except Exception as e:log.warning("ERROR error=%s:%s",type(e).__name__,e)
+        log.warning("ROUTE_REJECT protocol=0x%s peer=%s",data[:1].hex() if data else "-",peer)
+    except Exception as e:log.warning("ERROR peer=%s error=%s:%s",peer,type(e).__name__,e)
     finally:
         try:writer.close();await writer.wait_closed()
         except Exception:pass
 
 async def main():
-    server=await asyncio.start_server(handle,"0.0.0.0",PORT,limit=262144);log.warning("GATEWAY_READY=%s",PORT);log.warning("HTTP_ROUTES=%s",http_routes());log.warning("TLS_ROUTES=%s",tls_routes())
+    server=await asyncio.start_server(handle,"0.0.0.0",PORT,limit=262144)
+    log.warning("GATEWAY_READY=%s",PORT);log.warning("HTTP_ROUTES=%s",http_routes());log.warning("TLS_ROUTES=%s",tls_routes())
     async with server:await server.serve_forever()
 
 if __name__=="__main__":asyncio.run(main())
