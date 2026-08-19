@@ -1,0 +1,4 @@
+way-v70-standard-core
+source-of-truth=main
+railway-networking=runtime-only
+node-topology=3-or-4
