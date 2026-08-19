@@ -14,7 +14,8 @@ if [ "$BOOTSTRAP" = 0 ]; then
   [ "$TCP_PORT" -ge 1 ] && [ "$TCP_PORT" -le 65535 ] || { echo "FATAL: invalid current Railway TCP proxy port" >&2; exit 1; }
   [ "$APP_PORT" -ge 1 ] && [ "$APP_PORT" -le 65535 ] || { echo "FATAL: invalid current Railway TCP application port" >&2; exit 1; }
 else
-  APP_PORT="${PORT:-${GATEWAY_PORT:-8080}}"
+  APP_PORT="${PORT:-}"
+  [ -n "$APP_PORT" ] || { echo "FATAL: Railway assigned PORT unavailable during networking bootstrap" >&2; exit 1; }
 fi
 if [ -s "$D/uuid.txt" ]; then UUID=$(tr -d '[:space:]'<"$D/uuid.txt"); else UUID=$(xray uuid); secret "$D/uuid.txt" "$UUID"; fi
 if [ -s "$D/reality_private_key.txt" ] && [ -s "$D/reality_public_key.txt" ]; then PRIV=$(tr -d '[:space:]'<"$D/reality_private_key.txt"); PUB=$(tr -d '[:space:]'<"$D/reality_public_key.txt"); else OUT=$(xray x25519 2>&1); PRIV=$(printf '%s\n' "$OUT"|awk -F': ' '/^PrivateKey/{print $2;exit}'); PUB=$(printf '%s\n' "$OUT"|awk -F': ' '/^Password/{print $2;exit}'); [ -n "$PRIV" ] && [ -n "$PUB" ] || exit 1; secret "$D/reality_private_key.txt" "$PRIV"; secret "$D/reality_public_key.txt" "$PUB"; fi
@@ -27,7 +28,7 @@ python3 - "$C" "$D/subscription.txt" "$UUID" "$R" "$PUBLIC" "$TCP_HOST" "$TCP_PO
 import json,re,sys
 from pathlib import Path
 cfg=json.loads(Path(sys.argv[1]).read_text()); sub=[x for x in Path(sys.argv[2]).read_text().splitlines() if x.strip()]; u,rt,public,tcp_host,tcp_port=sys.argv[3],json.loads(Path(sys.argv[4]).read_text()),sys.argv[5],sys.argv[6],sys.argv[7]
-bootstrap=bool(rt.get('bootstrap')); cf=bool(rt['cloudflare']['enabled']); expected=1 if bootstrap else (4 if cf else 3); n=int(rt['nodes']['count']); app=rt.get('application_port')
+bootstrap=bool(rt.get('bootstrap')); cf=bool(rt['cloudflare']['enabled']); expected=1 if bootstrap else (4 if cf else 3); n=int(rt['nodes']['count'])
 if n!=expected or len(sub)!=expected or len(cfg['inbounds'])!=expected: raise SystemExit(f'FATAL: topology mismatch runtime={n} xray={len(cfg["inbounds"])} subscription={len(sub)} expected={expected}')
 ids=[x.get('id') for i in cfg['inbounds'] for x in i.get('settings',{}).get('clients',[])];
 if not ids or any(x!=u for x in ids): raise SystemExit('FATAL: UUID invariant failed')
