@@ -14,8 +14,8 @@ COPY scripts/ /opt/xray/scripts/
 COPY config/ /opt/xray/config/
 COPY site/ /opt/xray/site/
 RUN chmod 0755 /usr/local/bin/xray /usr/local/bin/cloudflared /opt/xray/scripts/*.sh /opt/xray/scripts/*.py && chmod 0644 /opt/xray/config/* /opt/xray/site/*
-ENV BUILD_ID=standard-core-dynamic-networking-v2 \
-    SOURCE_BUILD=standard-core-dynamic-networking-v2 \
+ENV BUILD_ID=way-v70-standard-core \
+    SOURCE_BUILD=way-v70-standard-core \
     PORT=8080 \
     GATEWAY_PORT=8080 \
     XRAY_CONFIG=/etc/xray/config.json \
@@ -26,7 +26,7 @@ ENV BUILD_ID=standard-core-dynamic-networking-v2 \
     REALITY_XHTTP_SNI=www.apple.com \
     REALITY_XHTTP_TARGET=www.apple.com:443 \
     XHTTP_PATH=/xhttp \
-    READY_TIMEOUT=180 \
+    READY_TIMEOUT=120 \
     GATEWAY_MAX_CONNECTIONS=512 \
     GATEWAY_READ_TIMEOUT=20 \
     GATEWAY_UPSTREAM_TIMEOUT=15 \
