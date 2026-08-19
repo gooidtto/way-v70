@@ -115,22 +115,20 @@ PY
     if ! waitp "$CFPPORT" cloudflare-origin; then
       kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""; node4_fallback "cloudflare-origin-not-ready"
     else
-      # A token-managed tunnel uses its remote Cloudflare ingress configuration; CLOUDFLARE_ORIGIN_SERVICE
-      # is only an invariant here and cannot configure that remote route. Verify the public hostname
-      # reaches Cloudflare without treating an HTTP status alone as proof of an origin connection.
+      # Token-managed tunnels take their published hostname -> origin mapping from the
+      # remote Cloudflare tunnel configuration. CLOUDFLARE_ORIGIN_SERVICE is only a local
+      # invariant and must never be treated as proof that the public route is correct.
       if ! python3 - "$CF_HOST" "$CF_PATH" <<'PY'
-import socket,ssl,sys,os
-host=sys.argv[1].strip(); path=sys.argv[2].strip() or '/';
+import socket,ssl,sys,base64,os
+host=sys.argv[1].strip(); path=sys.argv[2].strip() or '/'
 if not path.startswith('/'): path='/'+path
-ctx=ssl.create_default_context(); ctx.check_hostname=True
 try:
     raw=socket.create_connection((host,443),timeout=8)
-    s=ctx.wrap_socket(raw,server_hostname=host)
-    key='dGVzdGtleQ=='
+    ctx=ssl.create_default_context(); s=ctx.wrap_socket(raw,server_hostname=host)
+    key=base64.b64encode(os.urandom(16)).decode()
     req=(f'GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n').encode()
-    s.sendall(req); data=s.recv(4096)
-    s.close()
-    ok=data.startswith(b'HTTP/1.1 ') and b'\r\n' in data and not (b'502 Bad Gateway' in data or b'530 ' in data or b'1016' in data)
+    s.sendall(req); data=s.recv(4096); s.close()
+    ok=data.startswith(b'HTTP/1.1 101 ')
     raise SystemExit(0 if ok else 1)
 except Exception:
     raise SystemExit(1)
