@@ -3,7 +3,7 @@ import asyncio,base64,json,logging,os,re,socket,struct,urllib.parse
 from pathlib import Path
 
 PORT=int(os.environ.get("GATEWAY_PORT","8080"));D=Path(os.environ.get("DATA_DIR","/data"));SITE=Path("/opt/xray/site/index.html");TOKEN=D/"subscription_token.txt";SUB=D/"subscription.txt";RUNTIME=D/"runtime.json"
-MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","20")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(16384,int(os.environ.get("GATEWAY_MAX_INITIAL","196608"))))
+MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","12")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(16384,int(os.environ.get("GATEWAY_MAX_INITIAL","196608"))))
 SEM=asyncio.Semaphore(MAX_CONNECTIONS);INIT_SEM=asyncio.Semaphore(max(32,MAX_CONNECTIONS*2));HTTP_METHODS=(b"GET ",b"POST ",b"HEAD ",b"PUT ",b"OPTIONS ",b"PATCH ",b"DELETE ",b"PRI * HTTP/2.0")
 logging.basicConfig(level=getattr(logging,os.environ.get("GATEWAY_LOGLEVEL","INFO").upper(),logging.INFO),format="[gateway] %(levelname)s %(message)s");log=logging.getLogger("gateway")
 
@@ -22,8 +22,7 @@ def http_route(path):
     rs=http_routes();exact=rs.get(path)
     if exact:return exact
     matches=[(base,route) for base,route in rs.items() if path.startswith(base.rstrip("/")+"/")]
-    if not matches:return None
-    return max(matches,key=lambda x:len(x[0]))[1]
+    return max(matches,key=lambda x:len(x[0]))[1] if matches else None
 
 def ready(p):
     try:
@@ -43,73 +42,85 @@ def subscription(token):
     lines=[x.strip() for x in SUB.read_text().splitlines() if x.strip()];n=int(routes()[0].get("nodes",{}).get("count",0))
     return (base64.b64encode("\n".join(lines).encode()),"OK") if len(lines)==n else (None,"SUB_INVALID")
 
-def parse_sni(h):
+def parse_client_hello(body):
     try:
-        if len(h)<4 or h[0]!=1:return None
-        end=4+int.from_bytes(h[1:4],"big")
-        if end>len(h):return None
-        p=38
-        if p>=end:return None
-        sid_len=h[p];p+=1+sid_len
-        if p+2>end:return None
-        cipher_len=struct.unpack("!H",h[p:p+2])[0];p+=2+cipher_len
-        if p>=end:return None
-        comp_len=h[p];p+=1+comp_len
-        if p+2>end:return None
-        ext_len=struct.unpack("!H",h[p:p+2])[0];p+=2;stop=min(end,p+ext_len)
+        if len(body)<4 or body[0]!=1:return None,None
+        total=4+int.from_bytes(body[1:4],"big")
+        if total>len(body):return None,None
+        end=total;p=4+2+32
+        if p>=end:return None,None
+        sid_len=body[p];p+=1+sid_len
+        if p+2>end:return None,None
+        cipher_len=struct.unpack("!H",body[p:p+2])[0];p+=2+cipher_len
+        if p>=end:return None,None
+        comp_len=body[p];p+=1+comp_len
+        if p+2>end:return None,None
+        ext_len=struct.unpack("!H",body[p:p+2])[0];p+=2;stop=min(end,p+ext_len);sni=None;alpn=[]
         while p+4<=stop:
-            typ,ln=struct.unpack("!HH",h[p:p+4]);p+=4
-            if p+ln>stop:return None
-            if typ==0 and ln>=5:
-                q=p+2;e=p+ln
+            typ,ln=struct.unpack("!HH",body[p:p+4]);p+=4
+            if p+ln>stop:return sni,alpn
+            ext=body[p:p+ln]
+            if typ==0 and len(ext)>=5:
+                q=2;e=len(ext)
                 while q+3<=e:
-                    nt=h[q];nl=struct.unpack("!H",h[q+1:q+3])[0];q+=3
-                    if q+nl>e:return None
-                    if nt==0:return h[q:q+nl].decode("idna").lower().rstrip(".")
+                    nt=ext[q];nl=struct.unpack("!H",ext[q+1:q+3])[0];q+=3
+                    if q+nl>e:break
+                    if nt==0:
+                        sni=ext[q:q+nl].decode("idna").lower().rstrip(".");break
                     q+=nl
+            elif typ==16 and len(ext)>=2:
+                q=2;e=len(ext)
+                while q<e:
+                    if q>=e:break
+                    nl=ext[q];q+=1
+                    if q+nl>e:break
+                    alpn.append(ext[q:q+nl].decode("ascii","ignore"));q+=nl
             p+=ln
-    except Exception:return None
+        return sni,alpn
+    except Exception:return None,[]
 
-def tls_sni(buf):
-    if len(buf)<5 or buf[0]!=22 or buf[1]!=3:return None
-    pos=0;hs=bytearray()
+def tls_metadata(buf):
+    if len(buf)<5 or buf[0]!=22 or buf[1]!=3:return None,[],False
+    pos=0;hs=bytearray();complete=False
     while pos+5<=len(buf):
-        typ=buf[pos];ver_minor=buf[pos+2];ln=struct.unpack("!H",buf[pos+3:pos+5])[0]
-        if buf[pos+1]!=3 or ver_minor>4:return None
+        typ,major,minor=buf[pos],buf[pos+1],buf[pos+2];ln=struct.unpack("!H",buf[pos+3:pos+5])[0]
+        if major!=3 or minor>4:return None,[],False
         if pos+5+ln>len(buf):break
         if typ==22:
             hs.extend(buf[pos+5:pos+5+ln])
             while len(hs)>=4:
                 total=4+int.from_bytes(hs[1:4],"big")
                 if len(hs)<total:break
-                s=parse_sni(bytes(hs[:total]));del hs[:total]
-                if s:return s
+                sni,alpn=parse_client_hello(bytes(hs[:total]));del hs[:total];complete=True
+                if sni:return sni,alpn,True
         pos+=5+ln
-    return None
+    return None,[],complete
 
 def raw_configured_sni(buf):
-    """Match only SNI values declared by the current runtime topology.
-    This is a fallback for fragmented/atypical ClientHello parsing; it never
-    invents a destination and therefore remains fully runtime-driven.
-    """
-    _,rs=routes();lower=buf.lower()
-    candidates=[]
+    _,rs=routes();lower=buf.lower();candidates=[]
     for name,v in rs.items():
-        sni=(v.get("sni") or "").strip().lower().rstrip(".")
-        port=v.get("port")
+        sni=(v.get("sni") or "").strip().lower().rstrip(".");port=v.get("port")
         if not sni or not port:continue
-        needle=sni.encode("idna")
+        try:needle=sni.encode("idna")
+        except UnicodeError:continue
         if needle in lower:candidates.append((len(needle),sni,("127.0.0.1",int(port),name)))
-    if not candidates:return None,None,"none"
-    _,sni,route=max(candidates,key=lambda x:x[0])
-    return route,sni,"raw-sni"
+    if not candidates:return None,None
+    _,sni,route=max(candidates,key=lambda x:x[0]);return route,sni
 
-def tls_route_from_raw(buf):
-    rs=tls_routes();s=tls_sni(buf)
-    if s and s in rs:return rs[s],s,"parser"
-    route,sni,method=raw_configured_sni(buf)
-    if route:return route,sni,method
-    return None,s,"none"
+def tls_route(buf):
+    rs=tls_routes();sni,alpn,complete=tls_metadata(buf)
+    if sni and sni in rs:return rs[sni],sni,"parser",alpn,complete
+    route,sni2=raw_configured_sni(buf)
+    if route:return route,sni2,"raw-sni",alpn,complete
+    return None,sni or sni2,"none",alpn,complete
+
+def strip_proxy_header(buf):
+    # Railway TCP should normally be raw TCP. If a compatible PROXY-v1 header
+    # is ever present, remove only that header and preserve all payload bytes.
+    if not buf.startswith(b"PROXY "):return buf,False
+    end=buf.find(b"\r\n")
+    if end<0 or end>108:return buf,False
+    return buf[end+2:],True
 
 async def initial(reader):
     buf=bytearray();deadline=asyncio.get_running_loop().time()+READ_TIMEOUT
@@ -119,11 +130,16 @@ async def initial(reader):
         try:chunk=await asyncio.wait_for(reader.read(min(16384,MAX_INITIAL-len(buf))),max(.1,remaining))
         except asyncio.TimeoutError:break
         if not chunk:break
-        buf.extend(chunk);b=bytes(buf)
+        buf.extend(chunk);payload,proxied=strip_proxy_header(bytes(buf))
+        if proxied:
+            log.info("PROXY_HEADER_STRIPPED bytes=%d",len(buf)-len(payload));buf=bytearray(payload)
+        b=bytes(buf)
+        if not b:continue
         if b.startswith(HTTP_METHODS) and (b"\r\n\r\n" in b or len(b)>=8192):return b
-        if len(b)>=5 and b[0]==22 and b[1]==3 and b[2]<=4:
-            route,sni,method=tls_route_from_raw(b)
-            if route:return b
+        if b[:1]==b"\x16" and len(b)>=5 and b[1]==3 and b[2]<=4:
+            route,sni,method,alpn,complete=tls_route(b)
+            if route and (complete or sni):return b
+            continue
         if b[:1]!=b"\x16":return b
     return bytes(buf)
 
@@ -179,17 +195,17 @@ async def handle(reader,writer):
     try:
         async with INIT_SEM:data=await initial(reader)
         if not data:return
-        log.info("INCOMING peer=%s first=0x%s bytes=%d",peer,data[:1].hex() if data else "-",len(data))
+        log.info("INCOMING peer=%s first=0x%s bytes=%d head=%s",peer,data[:1].hex(),len(data),data[:32].hex())
         if data.startswith(HTTP_METHODS):
             async with SEM:await http(reader,writer,data);return
         if data[:1]==b"\x16" and len(data)>=3 and data[1]==3 and data[2]<=4:
-            route,sni,method=tls_route_from_raw(data)
-            log.info("TLS_ROUTE_DETECT peer=%s sni=%s method=%s",peer,sni or "-",method)
+            route,sni,method,alpn,complete=tls_route(data)
+            log.info("TLS_ROUTE_DETECT peer=%s sni=%s alpn=%s method=%s complete=%s",peer,sni or "-",','.join(alpn) or '-',method,complete)
             if route:
                 async with SEM:await relay(reader,writer,data,route[:2],route[2])
-            else:log.warning("ROUTE_REJECT tls_sni=%s peer=%s",sni or "-",peer)
+            else:log.warning("ROUTE_REJECT tls_sni=%s alpn=%s peer=%s",sni or "-",','.join(alpn) or '-',peer)
             return
-        log.warning("ROUTE_REJECT protocol=0x%s peer=%s",data[:1].hex() if data else "-",peer)
+        log.warning("ROUTE_REJECT protocol=0x%s peer=%s",data[:1].hex(),peer)
     except Exception as e:log.warning("ERROR peer=%s error=%s:%s",peer,type(e).__name__,e)
     finally:
         try:writer.close();await writer.wait_closed()
