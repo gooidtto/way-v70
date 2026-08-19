@@ -1,11 +1,11 @@
 {
-  "release": "stable-optional-cloudflare-ws-v5-stability",
-  "architecture": "single-8080-router-plus-optional-cloudflare-tunnel",
+  "release": "way-v70-standard-core",
+  "architecture": "single-8080-router-with-dynamic-railway-topology",
   "base_nodes": 3,
   "max_nodes": 4,
   "application_port": 8080,
   "entries": {
-    "443": "xhttp-tls",
+    "443": "railway-public-xhttp-tls",
     "tcp-proxy": "raw-reality-vision + xhttp-reality",
     "cloudflare": "optional-ws-tls"
   },
@@ -15,13 +15,8 @@
     "xhttp_reality_sni": 10088,
     "cloudflare_ws": "optional"
   },
-  "source_of_truth": "stability/four-node-longrun",
-  "cloudflare_enablement": "CLOUDFLARE_TUNNEL_TOKEN + CLOUDFLARE_TUNNEL_ID + CLOUDFLARE_PUBLIC_HOSTNAME + CLOUDFLARE_ORIGIN_SERVICE + WS_PORT + WS_PATH",
-  "stability_fixes": [
-    "persistent UUID across container/process restarts",
-    "separate initial-connection and long-lived relay admission limits",
-    "explicit TCP listen backlog",
-    "reduced normal gateway log verbosity",
-    "atomic runtime/state/manifest/subscription writes"
-  ]
+  "source_of_truth": "main",
+  "cloudflare_enablement": "all six Cloudflare Variables must be valid",
+  "runtime_source": "current Railway Public Networking",
+  "node4_rule": "Node 04 exists only when the complete Cloudflare condition is satisfied"
 }
