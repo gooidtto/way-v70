@@ -3,8 +3,9 @@ import asyncio,base64,json,logging,os,re,socket,struct,urllib.parse
 from pathlib import Path
 
 PORT=int(os.environ.get("GATEWAY_PORT","8080"));D=Path(os.environ.get("DATA_DIR","/data"));SITE=Path("/opt/xray/site/index.html");TOKEN=D/"subscription_token.txt";SUB=D/"subscription.txt";RUNTIME=D/"runtime.json"
-MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","12")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(16384,int(os.environ.get("GATEWAY_MAX_INITIAL","196608"))))
+MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","12")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(16384,int(os.environ.get("GATEWAY_MAX_INITIAL","196196"))))
 SEM=asyncio.Semaphore(MAX_CONNECTIONS);INIT_SEM=asyncio.Semaphore(max(32,MAX_CONNECTIONS*2));HTTP_METHODS=(b"GET ",b"POST ",b"HEAD ",b"PUT ",b"OPTIONS ",b"PATCH ",b"DELETE ",b"PRI * HTTP/2.0")
+PROXY_V2_SIG=b"\r\n\r\n\x00\r\nQUIT\n"
 logging.basicConfig(level=getattr(logging,os.environ.get("GATEWAY_LOGLEVEL","INFO").upper(),logging.INFO),format="[gateway] %(levelname)s %(message)s");log=logging.getLogger("gateway")
 
 def routes():
@@ -71,7 +72,6 @@ def parse_client_hello(body):
             elif typ==16 and len(ext)>=2:
                 q=2;e=len(ext)
                 while q<e:
-                    if q>=e:break
                     nl=ext[q];q+=1
                     if q+nl>e:break
                     alpn.append(ext[q:q+nl].decode("ascii","ignore"));q+=nl
@@ -115,12 +115,28 @@ def tls_route(buf):
     return None,sni or sni2,"none",alpn,complete
 
 def strip_proxy_header(buf):
-    # Railway TCP should normally be raw TCP. If a compatible PROXY-v1 header
-    # is ever present, remove only that header and preserve all payload bytes.
-    if not buf.startswith(b"PROXY "):return buf,False
-    end=buf.find(b"\r\n")
-    if end<0 or end>108:return buf,False
-    return buf[end+2:],True
+    """Strip PROXY protocol v1 or v2, preserving the original application bytes.
+    Returns (payload, stripped, incomplete). The incomplete result is important:
+    a v2 signature may arrive before the complete 16-byte header and must not be
+    mistaken for a REALITY/TLS protocol byte.
+    """
+    if buf.startswith(b"PROXY "):
+        end=buf.find(b"\r\n")
+        if end<0:
+            return buf,False,len(buf)<108
+        if end>108:return buf,False,False
+        return buf[end+2:],True,False
+    if buf.startswith(PROXY_V2_SIG):
+        if len(buf)<16:return buf,False,True
+        ver_cmd=buf[12];fam_proto=buf[13];length=struct.unpack("!H",buf[14:16])[0]
+        if (ver_cmd & 0xF0)!=0x20 or fam_proto not in (0x00,0x11,0x12,0x21,0x22,0x31,0x32):
+            return buf,False,False
+        total=16+length
+        if total>MAX_INITIAL:return buf,False,False
+        if len(buf)<total:return buf,False,True
+        log.info("PROXY_V2_HEADER_STRIPPED bytes=%d family_proto=0x%02x",total,fam_proto)
+        return buf[total:],True,False
+    return buf,False,False
 
 async def initial(reader):
     buf=bytearray();deadline=asyncio.get_running_loop().time()+READ_TIMEOUT
@@ -130,7 +146,8 @@ async def initial(reader):
         try:chunk=await asyncio.wait_for(reader.read(min(16384,MAX_INITIAL-len(buf))),max(.1,remaining))
         except asyncio.TimeoutError:break
         if not chunk:break
-        buf.extend(chunk);payload,proxied=strip_proxy_header(bytes(buf))
+        buf.extend(chunk);payload,proxied,incomplete=strip_proxy_header(bytes(buf))
+        if incomplete:continue
         if proxied:
             log.info("PROXY_HEADER_STRIPPED bytes=%d",len(buf)-len(payload));buf=bytearray(payload)
         b=bytes(buf)
