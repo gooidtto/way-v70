@@ -35,14 +35,30 @@ CF_NAMES=("CLOUDFLARE_TUNNEL_TOKEN","CLOUDFLARE_TUNNEL_ID","CLOUDFLARE_PUBLIC_HO
 CF={name:env(name) for name in CF_NAMES}
 CF_CONFIGURED=any(CF.values())
 CF_ENABLED=all(CF.values())
-if CF_CONFIGURED and not CF_ENABLED: raise SystemExit("FATAL: incomplete Cloudflare Variables; either set all six or none")
-CF_PORT=None
-if CF_ENABLED:
-    try: CF_PORT=int(CF["WS_PORT"])
-    except ValueError: raise SystemExit("FATAL: WS_PORT is not an integer")
-    if not 1<=CF_PORT<=65535 or CF_PORT in (APP_PORT,10086,10087,10088): raise SystemExit("FATAL: invalid/conflicting WS_PORT")
-    if not re.fullmatch(r"[A-Za-z0-9.-]+",CF["CLOUDFLARE_PUBLIC_HOSTNAME"]): raise SystemExit("FATAL: invalid Cloudflare hostname")
-    if not CF["WS_PATH"].startswith("/"): raise SystemExit("FATAL: WS_PATH must start with /")
+CF_STATIC_VALID=False
+CF_GATE_REASON="disabled"
+if CF_CONFIGURED and not CF_ENABLED:
+    CF_GATE_REASON="incomplete-variables"
+elif CF_ENABLED:
+    try:
+        CF_PORT=int(CF["WS_PORT"])
+    except ValueError:
+        CF_PORT=None
+        CF_GATE_REASON="invalid-ws-port"
+    else:
+        valid_port=1<=CF_PORT<=65535 and CF_PORT not in (APP_PORT,10086,10087,10088)
+        valid_host=bool(re.fullmatch(r"[A-Za-z0-9.-]+",CF["CLOUDFLARE_PUBLIC_HOSTNAME"]))
+        valid_origin=bool(CF["CLOUDFLARE_ORIGIN_SERVICE"])
+        valid_path=CF["WS_PATH"].startswith("/")
+        CF_STATIC_VALID=valid_port and valid_host and valid_origin and valid_path
+        CF_GATE_REASON="candidate" if CF_STATIC_VALID else "invalid-variables"
+else:
+    CF_PORT=None
+
+# NODE4_FORCE_DISABLED is used only by start.sh after the runtime Cloudflare gate fails.
+if env("NODE4_FORCE_DISABLED") == "1":
+    CF_ENABLED=False
+    CF_GATE_REASON="runtime-gate-failed"
 
 sid_file=D/"reality_short_ids.json"
 try: ids=json.loads(sid_file.read_text()) if sid_file.exists() else []
@@ -91,9 +107,9 @@ routes={"node01":{"path":XPATH,"port":10086},"node02":{"sni":RAW_SNI,"port":1008
 if CF_ENABLED: routes["node04"]={"host":CF["CLOUDFLARE_PUBLIC_HOSTNAME"],"path":CF["WS_PATH"],"origin_service":CF["CLOUDFLARE_ORIGIN_SERVICE"],"port":CF_PORT}
 dist={"01":"domain-xhttp-tls","02":"raw-reality-vision","03":"xhttp-reality"}
 if CF_ENABLED: dist["04"]="cloudflare-ws-tls"
-runtime={"schema":31,"build":"way-v70-standard-core","architecture":"standard-three-node-core-plus-optional-node4","nodes":{"count":count,"distribution":dist},"application_port":APP_PORT,"public_domain":PUBLIC,"tcp_proxy":{"domain":TCP_HOST,"port":TCP_PORT,"application_port":APP_PORT},"railway_networking":{"source":"current-deployment-environment","authoritative":True,"subscription_source":"current-runtime-values"},"cloudflare":{"enabled":CF_ENABLED,"public_hostname":CF["CLOUDFLARE_PUBLIC_HOSTNAME"] if CF_ENABLED else "","origin_service":CF["CLOUDFLARE_ORIGIN_SERVICE"] if CF_ENABLED else "","ws_port":CF_PORT if CF_ENABLED else None,"ws_path":CF["WS_PATH"] if CF_ENABLED else ""},"routes":routes}
+runtime={"schema":32,"build":"way-v70-standard-core","architecture":"standard-three-node-core-plus-runtime-gated-node4","nodes":{"count":count,"distribution":dist},"application_port":APP_PORT,"public_domain":PUBLIC,"tcp_proxy":{"domain":TCP_HOST,"port":TCP_PORT,"application_port":APP_PORT},"railway_networking":{"source":"current-deployment-environment","authoritative":True,"subscription_source":"current-runtime-values"},"cloudflare":{"enabled":CF_ENABLED,"static_valid":CF_STATIC_VALID,"gate_reason":CF_GATE_REASON,"public_hostname":CF["CLOUDFLARE_PUBLIC_HOSTNAME"] if CF_ENABLED else "","origin_service":CF["CLOUDFLARE_ORIGIN_SERVICE"] if CF_ENABLED else "","ws_port":CF_PORT if CF_ENABLED else None,"ws_path":CF["WS_PATH"] if CF_ENABLED else ""},"routes":routes}
 runtime["fingerprint"]=hashlib.sha256(json.dumps(runtime,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 def atomic(path,text):
     tmp=path.with_name(path.name+".tmp");tmp.write_text(text);os.chmod(tmp,0o600);os.replace(tmp,path)
-rt=json.dumps(runtime,indent=2)+"\n";atomic(D/"runtime.json",rt);atomic(D/"state.json",rt);atomic(D/"subscription.txt","\n".join(lines)+"\n");atomic(D/"manifest.json",json.dumps({"schema":31,"build":runtime["build"],"node_count":count,"distribution":dist,"railway_networking_source":"current-deployment-environment","subscription_source":"current-runtime-values","node4_enabled":CF_ENABLED},indent=2)+"\n")
-print("RELEASE=way-v70-standard-core");print("TOPOLOGY="+str(count));print("NODE4_ENABLED="+str(CF_ENABLED).lower());print("CLOUDFLARE="+('enabled' if CF_ENABLED else 'disabled'));print("RAILWAY_CURRENT_PUBLIC="+PUBLIC);print(f"RAILWAY_CURRENT_TCP={TCP_HOST}:{TCP_PORT}");print("RAILWAY_CURRENT_APPLICATION_PORT="+str(APP_PORT));print("SUBSCRIPTION_SOURCE=current-runtime-values");print("SUBSCRIPTION_COUNT="+str(count));print("NODE_ORDER=01:RAILWAY_XHTTP,02:RAW_REALITY,03:XHTTP_REALITY"+(',04:CLOUDFLARE_WS' if CF_ENABLED else ''))
+rt=json.dumps(runtime,indent=2)+"\n";atomic(D/"runtime.json",rt);atomic(D/"state.json",rt);atomic(D/"subscription.txt","\n".join(lines)+"\n");atomic(D/"manifest.json",json.dumps({"schema":32,"build":runtime["build"],"node_count":count,"distribution":dist,"railway_networking_source":"current-deployment-environment","subscription_source":"current-runtime-values","node4_enabled":CF_ENABLED,"node4_static_valid":CF_STATIC_VALID,"node4_gate_reason":CF_GATE_REASON},indent=2)+"\n")
+print("RELEASE=way-v70-standard-core");print("TOPOLOGY="+str(count));print("NODE4_ENABLED="+str(CF_ENABLED).lower());print("NODE4_STATIC_VALID="+str(CF_STATIC_VALID).lower());print("NODE4_GATE_REASON="+CF_GATE_REASON);print("CLOUDFLARE="+('candidate' if CF_ENABLED else 'disabled'));print("RAILWAY_CURRENT_PUBLIC="+PUBLIC);print(f"RAILWAY_CURRENT_TCP={TCP_HOST}:{TCP_PORT}");print("RAILWAY_CURRENT_APPLICATION_PORT="+str(APP_PORT));print("SUBSCRIPTION_SOURCE=current-runtime-values");print("SUBSCRIPTION_COUNT="+str(count));print("NODE_ORDER=01:RAILWAY_XHTTP,02:RAW_REALITY,03:XHTTP_REALITY"+(',04:CLOUDFLARE_WS' if CF_ENABLED else ''))
