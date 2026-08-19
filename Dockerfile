@@ -12,7 +12,8 @@ COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
 COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 COPY scripts/ /opt/xray/scripts/
 COPY site/ /opt/xray/site/
-RUN chmod 0755 /usr/local/bin/xray /usr/local/bin/cloudflared /opt/xray/scripts/*.sh /opt/xray/scripts/*.py && chmod 0644 /opt/xray/site/*
+COPY BUILD_VERSION /opt/xray/BUILD_VERSION
+RUN chmod 0755 /usr/local/bin/xray /usr/local/bin/cloudflared /opt/xray/scripts/*.sh /opt/xray/scripts/*.py && chmod 0644 /opt/xray/site/* /opt/xray/BUILD_VERSION
 ENV BUILD_ID=way-v70-standard-core \
     SOURCE_BUILD=way-v70-standard-core \
     XRAY_CONFIG=/etc/xray/config.json \
@@ -29,7 +30,7 @@ ENV BUILD_ID=way-v70-standard-core \
     GATEWAY_UPSTREAM_TIMEOUT=15 \
     GATEWAY_IDLE_TIMEOUT=900 \
     GATEWAY_MAX_INITIAL=131072 \
-    GATEWAY_LOGLEVEL=WARNING
-RUN echo "SOURCE_BUILD=${SOURCE_BUILD} BUILD_ID=${BUILD_ID}" && sha256sum /opt/xray/scripts/generate.py /opt/xray/scripts/start.sh /opt/xray/scripts/gateway.py
+    GATEWAY_LOGLEVEL=INFO
+RUN echo "SOURCE_BUILD=${SOURCE_BUILD} BUILD_ID=${BUILD_ID}" && cat /opt/xray/BUILD_VERSION && sha256sum /opt/xray/scripts/generate.py /opt/xray/scripts/start.sh /opt/xray/scripts/gateway.py
 WORKDIR /opt/xray
 ENTRYPOINT ["/opt/xray/scripts/guard.sh"]
