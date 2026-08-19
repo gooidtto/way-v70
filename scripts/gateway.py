@@ -3,7 +3,7 @@ import asyncio,base64,json,logging,os,re,socket,struct,urllib.parse
 from pathlib import Path
 
 PORT=int(os.environ.get("GATEWAY_PORT","8080"));D=Path(os.environ.get("DATA_DIR","/data"));SITE=Path("/opt/xray/site/index.html");TOKEN=D/"subscription_token.txt";SUB=D/"subscription.txt";RUNTIME=D/"runtime.json"
-MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","20")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(8192,int(os.environ.get("GATEWAY_MAX_INITIAL","131072"))))
+MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","20")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(16384,int(os.environ.get("GATEWAY_MAX_INITIAL","196608"))))
 SEM=asyncio.Semaphore(MAX_CONNECTIONS);INIT_SEM=asyncio.Semaphore(max(32,MAX_CONNECTIONS*2));HTTP_METHODS=(b"GET ",b"POST ",b"HEAD ",b"PUT ",b"OPTIONS ",b"PATCH ",b"DELETE ",b"PRI * HTTP/2.0")
 logging.basicConfig(level=getattr(logging,os.environ.get("GATEWAY_LOGLEVEL","INFO").upper(),logging.INFO),format="[gateway] %(levelname)s %(message)s");log=logging.getLogger("gateway")
 
@@ -62,7 +62,6 @@ def parse_sni(h):
             if p+ln>stop:return None
             if typ==0 and ln>=5:
                 q=p+2;e=p+ln
-                if q>e:return None
                 while q+3<=e:
                     nt=h[q];nl=struct.unpack("!H",h[q+1:q+3])[0];q+=3
                     if q+nl>e:return None
@@ -75,8 +74,8 @@ def tls_sni(buf):
     if len(buf)<5 or buf[0]!=22 or buf[1]!=3:return None
     pos=0;hs=bytearray()
     while pos+5<=len(buf):
-        typ=buf[pos];ln=struct.unpack("!H",buf[pos+3:pos+5])[0]
-        if buf[pos+1]!=3 or buf[pos+2]>4:return None
+        typ=buf[pos];ver_minor=buf[pos+2];ln=struct.unpack("!H",buf[pos+3:pos+5])[0]
+        if buf[pos+1]!=3 or ver_minor>4:return None
         if pos+5+ln>len(buf):break
         if typ==22:
             hs.extend(buf[pos+5:pos+5+ln])
@@ -88,16 +87,28 @@ def tls_sni(buf):
         pos+=5+ln
     return None
 
+def raw_configured_sni(buf):
+    """Match only SNI values declared by the current runtime topology.
+    This is a fallback for fragmented/atypical ClientHello parsing; it never
+    invents a destination and therefore remains fully runtime-driven.
+    """
+    _,rs=routes();lower=buf.lower()
+    candidates=[]
+    for name,v in rs.items():
+        sni=(v.get("sni") or "").strip().lower().rstrip(".")
+        port=v.get("port")
+        if not sni or not port:continue
+        needle=sni.encode("idna")
+        if needle in lower:candidates.append((len(needle),sni,("127.0.0.1",int(port),name)))
+    if not candidates:return None,None,"none"
+    _,sni,route=max(candidates,key=lambda x:x[0])
+    return route,sni,"raw-sni"
+
 def tls_route_from_raw(buf):
-    rs=tls_routes()
-    s=tls_sni(buf)
+    rs=tls_routes();s=tls_sni(buf)
     if s and s in rs:return rs[s],s,"parser"
-    # REALITY ClientHello keeps SNI in plaintext. If record/handshake fragmentation
-    # prevents the strict parser from decoding it, match only configured route names.
-    lower=buf.lower()
-    for name,route in rs.items():
-        needle=name.encode("idna")
-        if needle in lower:return route,name,"raw-sni"
+    route,sni,method=raw_configured_sni(buf)
+    if route:return route,sni,method
     return None,s,"none"
 
 async def initial(reader):
@@ -105,12 +116,12 @@ async def initial(reader):
     while len(buf)<MAX_INITIAL:
         remaining=deadline-asyncio.get_running_loop().time()
         if remaining<=0:break
-        try:chunk=await asyncio.wait_for(reader.read(min(8192,MAX_INITIAL-len(buf))),max(.1,remaining))
+        try:chunk=await asyncio.wait_for(reader.read(min(16384,MAX_INITIAL-len(buf))),max(.1,remaining))
         except asyncio.TimeoutError:break
         if not chunk:break
         buf.extend(chunk);b=bytes(buf)
         if b.startswith(HTTP_METHODS) and (b"\r\n\r\n" in b or len(b)>=8192):return b
-        if len(b)>=5 and b[:2]==b"\x16\x03":
+        if len(b)>=5 and b[0]==22 and b[1]==3 and b[2]<=4:
             route,sni,method=tls_route_from_raw(b)
             if route:return b
         if b[:1]!=b"\x16":return b
@@ -128,7 +139,8 @@ async def pipe(reader,writer,label):
 async def relay(reader,writer,first,dest,label):
     upstream=None;tasks=set()
     try:
-        log.info("ROUTE_SELECTED route=%s dest=%s:%s initial=%d",label,dest[0],dest[1],len(first));ur,upstream=await asyncio.wait_for(asyncio.open_connection(*dest),UPSTREAM_TIMEOUT)
+        log.info("UPSTREAM_CONNECT route=%s dest=%s:%s",label,dest[0],dest[1]);ur,upstream=await asyncio.wait_for(asyncio.open_connection(*dest),UPSTREAM_TIMEOUT)
+        log.info("UPSTREAM_CONNECTED route=%s dest=%s:%s",label,dest[0],dest[1])
         if first:upstream.write(first);await upstream.drain()
         tasks={asyncio.create_task(pipe(reader,upstream,"c2u")),asyncio.create_task(pipe(ur,writer,"u2c"))};await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
     except asyncio.TimeoutError:log.warning("UPSTREAM_TIMEOUT route=%s dest=%s:%s",label,dest[0],dest[1])
@@ -163,14 +175,14 @@ async def http(reader,writer,data):
     await relay(reader,writer,data,mroute[:2],mroute[2])
 
 async def handle(reader,writer):
-    peer=writer.get_extra_info("peername");
+    peer=writer.get_extra_info("peername")
     try:
         async with INIT_SEM:data=await initial(reader)
         if not data:return
         log.info("INCOMING peer=%s first=0x%s bytes=%d",peer,data[:1].hex() if data else "-",len(data))
         if data.startswith(HTTP_METHODS):
             async with SEM:await http(reader,writer,data);return
-        if data[:2]==b"\x16\x03":
+        if data[:1]==b"\x16" and len(data)>=3 and data[1]==3 and data[2]<=4:
             route,sni,method=tls_route_from_raw(data)
             log.info("TLS_ROUTE_DETECT peer=%s sni=%s method=%s",peer,sni or "-",method)
             if route:
