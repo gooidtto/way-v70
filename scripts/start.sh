@@ -54,7 +54,6 @@ PY
   ); do waitp "${spec#*:}" "${spec%:*}" || return 1; done
 }
 
-# The first generation may contain a Node4 candidate. It is not advertised as usable until the runtime gate passes.
 if ! wait_base_routes; then echo "FATAL: base Xray route readiness failed" >&2; exit 1; fi
 python3 /opt/xray/scripts/gateway.py & GP=$!
 if ! waitp "$APP_PORT" gateway; then echo "FATAL: gateway readiness failed" >&2; exit 1; fi
@@ -70,6 +69,7 @@ node4_fallback(){
   echo "NODE4_FALLBACK_REASON=$reason"
   kill "$GP" 2>/dev/null || true; wait "$GP" 2>/dev/null || true; GP=""
   kill "$XP" 2>/dev/null || true; wait "$XP" 2>/dev/null || true; XP=""
+  if [ -n "$CFP" ]; then kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""; fi
   export NODE4_FORCE_DISABLED=1
   python3 /opt/xray/scripts/generate.py
   unset NODE4_FORCE_DISABLED
@@ -141,5 +141,13 @@ import json,sys; print(json.load(open(sys.argv[1]))['nodes']['count'])
 PY
 )
 echo "SOURCE_REPOSITORY=gooidtto/way-v70"; echo "SOURCE_BRANCH=main"; echo "RELEASE=$BUILD_ID"; echo "SOURCE_BUILD=$SOURCE_BUILD"; echo "RAILWAY_CURRENT_PUBLIC=$PUBLIC"; echo "RAILWAY_CURRENT_TCP=$TCP_HOST:$TCP_PORT"; echo "RAILWAY_CURRENT_APPLICATION_PORT=$APP_PORT"; echo "TOPOLOGY=$N"; echo "NODE4_ENABLED=$( [ "$CF_ENABLED" = 1 ] && echo true || echo false )"; echo "CLOUDFLARE=$( [ "$CF_ENABLED" = 1 ] && echo enabled || echo disabled )"; echo "SUBSCRIPTION_COUNT=$N"; echo "NODE_ORDER=01:RAILWAY_XHTTP,02:RAW_REALITY,03:XHTTP_REALITY$( [ "$CF_ENABLED" = 1 ] && echo ',04:CLOUDFLARE_WS' || true )"
-while kill -0 "$XP" 2>/dev/null && kill -0 "$GP" 2>/dev/null; do if [ "$CF_ENABLED" = 1 ]; then kill -0 "$CFP" 2>/dev/null || exit 1; fi; sleep 5; done
-exit 1
+while :; do
+  kill -0 "$XP" 2>/dev/null || exit 1
+  kill -0 "$GP" 2>/dev/null || exit 1
+  if [ "$CF_ENABLED" = 1 ]; then
+    if ! kill -0 "$CFP" 2>/dev/null; then
+      node4_fallback "cloudflared-exited-after-pass"
+    fi
+  fi
+  sleep 5
+done
