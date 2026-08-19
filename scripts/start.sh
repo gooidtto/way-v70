@@ -20,7 +20,7 @@ R="$D/runtime.json"; [ -s "$R" ] || exit 1
 
 validate_topology(){
 python3 - "$C" "$D/subscription.txt" "$UUID" "$R" "$PUBLIC" "$TCP_HOST" "$TCP_PORT" "$APP_PORT" <<'PY'
-import json,re,sys
+import json,re,sys,urllib.parse
 from pathlib import Path
 cfg=json.loads(Path(sys.argv[1]).read_text()); sub=[x for x in Path(sys.argv[2]).read_text().splitlines() if x.strip()]; u,rt,public,tcp_host,tcp_port,app_port=sys.argv[3],json.loads(Path(sys.argv[4]).read_text()),sys.argv[5],sys.argv[6],sys.argv[7],sys.argv[8]
 cf=bool(rt["cloudflare"]["enabled"]); expected=4 if cf else 3; n=int(rt["nodes"]["count"])
@@ -34,31 +34,30 @@ for i,line in enumerate(sub,1):
     host,port,q=m.group(2),m.group(3),m.group(4)
     if i==1 and (host!=public or port!='443'): raise SystemExit("FATAL: node1 Railway Public Domain mismatch")
     if i in (2,3) and (host!=tcp_host or port!=tcp_port): raise SystemExit(f"FATAL: node{i} Railway TCP endpoint mismatch")
-    if i==2 and ('sni='+urllib.parse.quote('www.cloudflare.com',safe='')) not in q: raise SystemExit("FATAL: node2 REALITY SNI mismatch")
-    if i==3 and ('sni='+urllib.parse.quote('www.apple.com',safe='')) not in q: raise SystemExit("FATAL: node3 XHTTP REALITY SNI mismatch")
+    if i==2 and 'sni=www.cloudflare.com' not in urllib.parse.unquote(q): raise SystemExit("FATAL: node2 REALITY SNI mismatch")
+    if i==3 and 'sni=www.apple.com' not in urllib.parse.unquote(q): raise SystemExit("FATAL: node3 XHTTP REALITY SNI mismatch")
     if i==4 and (not cf or host!=rt['cloudflare']['public_hostname'] or port!='443'): raise SystemExit("FATAL: node4 Cloudflare endpoint mismatch")
 PY
 }
 
-# urllib is intentionally imported by the validation snippet above.
 validate_topology
 xray run -test -config "$C"
 xray run -config "$C" & XP=$!; GP=""; CFP=""
 trap 'kill "$XP" "$GP" "$CFP" 2>/dev/null || true; wait "$XP" 2>/dev/null || true; wait "$GP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true' INT TERM EXIT
-waitp(){ p="$1";l="$2";i=0; while ! python3 -c 'import socket,sys;s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),1);s.close()' "$p" 2>/dev/null; do kill -0 "$XP" 2>/dev/null || exit 1; i=$((i+1)); [ "$i" -lt "${READY_TIMEOUT:-120}" ] || { echo "FATAL: readiness timeout $l:$p" >&2; exit 1; }; sleep 1; done; echo "READY_CHECK=$l:$p"; }
+waitp(){ p="$1";l="$2";i=0; while ! python3 -c 'import socket,sys;s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),1);s.close()' "$p" 2>/dev/null; do kill -0 "$XP" 2>/dev/null || return 1; i=$((i+1)); [ "$i" -lt "${READY_TIMEOUT:-120}" ] || { echo "FATAL: readiness timeout $l:$p" >&2; return 1; }; sleep 1; done; echo "READY_CHECK=$l:$p"; }
 wait_base_routes(){
   for spec in $(python3 - "$R" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))
 for name,node in r['routes'].items(): print(f'{name}:{node["port"]}')
 PY
-  ); do waitp "${spec#*:}" "${spec%:*}"; done
+  ); do waitp "${spec#*:}" "${spec%:*}" || return 1; done
 }
 
-# First bring up the generated topology. Node4 is only a candidate at this point.
-wait_base_routes
+# The first generation may contain a Node4 candidate. It is not advertised as usable until the runtime gate passes.
+if ! wait_base_routes; then echo "FATAL: base Xray route readiness failed" >&2; exit 1; fi
 python3 /opt/xray/scripts/gateway.py & GP=$!
-waitp "$APP_PORT" gateway
+if ! waitp "$APP_PORT" gateway; then echo "FATAL: gateway readiness failed" >&2; exit 1; fi
 
 CF_ENABLED=$(python3 - "$R" <<'PY'
 import json,sys; print('1' if json.load(open(sys.argv[1]))['cloudflare']['enabled'] else '0')
@@ -78,9 +77,9 @@ node4_fallback(){
   validate_topology
   xray run -test -config "$C"
   xray run -config "$C" & XP=$!
-  wait_base_routes
+  wait_base_routes || { echo "FATAL: three-node fallback readiness failed" >&2; exit 1; }
   python3 /opt/xray/scripts/gateway.py & GP=$!
-  waitp "$APP_PORT" gateway
+  waitp "$APP_PORT" gateway || { echo "FATAL: three-node fallback gateway readiness failed" >&2; exit 1; }
   CF_ENABLED=0
   echo "NODE4_ENABLED=false"
   echo "TOPOLOGY=3"
@@ -98,24 +97,22 @@ PY
   i=0
   CF_READY=0
   while :; do
-    if ! kill -0 "$CFP" 2>/dev/null; then
-      CF_READY=0
-      break
-    fi
+    if ! kill -0 "$CFP" 2>/dev/null; then CF_READY=0; break; fi
     if python3 - <<'PY' >/dev/null 2>&1
 import urllib.request
-u=urllib.request.urlopen('http://127.0.0.1:2000/metrics',timeout=1)
-s=u.read(200000).decode('utf-8','ignore')
+s=urllib.request.urlopen('http://127.0.0.1:2000/metrics',timeout=1).read(200000).decode('utf-8','ignore')
 raise SystemExit(0 if 'cloudflared_' in s else 1)
 PY
-    then CF_READY=1; break; fi
+    then
+      if grep -Eq 'Registered tunnel connection|tunnel connection.*registered' "$D/cloudflared.log" 2>/dev/null; then CF_READY=1; break; fi
+    fi
     i=$((i+1)); [ "$i" -lt "${CF_READY_TIMEOUT:-30}" ] || break
     sleep 1
   done
   if [ "$CF_READY" != 1 ]; then
     tail -n 80 "$D/cloudflared.log" >&2 || true
     kill "$CFP" 2>/dev/null || true; wait "$CFP" 2>/dev/null || true; CFP=""
-    node4_fallback "cloudflared-not-ready"
+    node4_fallback "cloudflared-tunnel-not-ready"
   else
     echo "CLOUDFLARE_TUNNEL_PROCESS=READY"
     echo "CLOUDFLARE_PUBLIC_HOSTNAME=$CF_HOST"
