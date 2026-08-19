@@ -5,44 +5,35 @@ PORT=int(os.environ.get("GATEWAY_PORT","8080"));D=Path(os.environ.get("DATA_DIR"
 MAX_CONNECTIONS=max(16,int(os.environ.get("GATEWAY_MAX_CONNECTIONS","512")));READ_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_READ_TIMEOUT","20")));UPSTREAM_TIMEOUT=max(3.0,float(os.environ.get("GATEWAY_UPSTREAM_TIMEOUT","15")));IDLE_TIMEOUT=max(30.0,float(os.environ.get("GATEWAY_IDLE_TIMEOUT","900")));MAX_INITIAL=min(262144,max(8192,int(os.environ.get("GATEWAY_MAX_INITIAL","131072"))))
 SEM=asyncio.Semaphore(MAX_CONNECTIONS);INIT_SEM=asyncio.Semaphore(max(32,MAX_CONNECTIONS*2));HTTP_METHODS=(b"GET ",b"POST ",b"HEAD ",b"PUT ",b"OPTIONS ",b"PATCH ",b"DELETE ",b"PRI * HTTP/2.0")
 logging.basicConfig(level=getattr(logging,os.environ.get("GATEWAY_LOGLEVEL","INFO").upper(),logging.INFO),format="[gateway] %(levelname)s %(message)s");log=logging.getLogger("gateway")
-
 def routes():
     try:
         rt=json.loads(RUNTIME.read_text());return rt,rt.get("routes",{})
     except Exception:return {},{}
-
 def http_routes():
     _,rs=routes();return {v["path"]:("127.0.0.1",int(v["port"]),k) for k,v in rs.items() if v.get("path") and v.get("port")}
-
 def tls_routes():
     _,rs=routes();return {v["sni"].lower().rstrip("."):("127.0.0.1",int(v["port"]),k) for k,v in rs.items() if v.get("sni") and v.get("port")}
-
 def http_route(path):
-    rs=http_routes()
-    exact=rs.get(path)
+    rs=http_routes();exact=rs.get(path)
     if exact:return exact
     matches=[(base,route) for base,route in rs.items() if path.startswith(base.rstrip("/")+"/")]
     if not matches:return None
     return max(matches,key=lambda x:len(x[0]))[1]
-
 def ready(p):
     try:
         with socket.create_connection(("127.0.0.1",p),timeout=1.5):return True
     except OSError:return False
-
 def readiness():
     rt,rs=routes();n=int(rt.get("nodes",{}).get("count",0));sub=[x for x in SUB.read_text().splitlines() if x.strip()] if SUB.exists() else []
     if n not in (3,4) or len(sub)!=n or not TOKEN.exists():return False,"state"
     for name,v in rs.items():
         if v.get("port") and not ready(int(v["port"])):return False,name
     return True,"ready"
-
 def subscription(token):
     if not TOKEN.exists() or token!=TOKEN.read_text().strip():return None,"TOKEN_INVALID"
     if not SUB.exists():return None,"SUB_MISSING"
     lines=[x.strip() for x in SUB.read_text().splitlines() if x.strip()];n=int(routes()[0].get("nodes",{}).get("count",0))
     return (base64.b64encode("\n".join(lines).encode()),"OK") if len(lines)==n else (None,"SUB_INVALID")
-
 def parse_sni(h):
     try:
         if len(h)<4 or h[0]!=1:return None
@@ -61,7 +52,6 @@ def parse_sni(h):
                     q+=nl
             p+=ln
     except Exception:return None
-
 def tls_sni(buf):
     if len(buf)<5 or buf[0]!=22 or buf[1]!=3:return None
     pos=0;hs=bytearray()
@@ -78,7 +68,6 @@ def tls_sni(buf):
                 if s:return s
         pos+=5+ln
     return None
-
 async def initial(reader):
     buf=bytearray();deadline=asyncio.get_running_loop().time()+READ_TIMEOUT
     while len(buf)<MAX_INITIAL:
@@ -90,7 +79,6 @@ async def initial(reader):
         if len(b)>=5 and b[:2]==b"\x16\x03" and tls_sni(b):return b
         if b[:1]!=b"\x16":return b
     return bytes(buf)
-
 async def pipe(reader,writer,label):
     try:
         while True:
@@ -99,7 +87,6 @@ async def pipe(reader,writer,label):
             writer.write(data);await writer.drain()
     except asyncio.CancelledError:raise
     except Exception as e:log.debug("PIPE_ERROR label=%s error=%s:%s",label,type(e).__name__,e)
-
 async def relay(reader,writer,first,dest,label):
     upstream=None;tasks=set()
     try:
@@ -116,10 +103,8 @@ async def relay(reader,writer,first,dest,label):
             if s:
                 try:s.close();await s.wait_closed()
                 except Exception:pass
-
 async def response(writer,status,body=b"",ctype=b"text/plain; charset=utf-8"):
     writer.write(b"HTTP/1.1 "+status+b"\r\nContent-Type: "+ctype+b"\r\nContent-Length: "+str(len(body)).encode()+b"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"+body);await writer.drain()
-
 async def http(reader,writer,data):
     first=data.split(b"\r\n",1)[0].decode("latin1","ignore");parts=first.split(" ",2);method=parts[0] if parts else "";target=parts[1] if len(parts)>1 else "";path=urllib.parse.urlsplit(target).path or "/"
     if method in ("GET","HEAD") and path in ("/health","/ready"):
@@ -136,7 +121,6 @@ async def http(reader,writer,data):
     if not route:
         log.warning("ROUTE_REJECT http_path=%s",path);await response(writer,b"404 Not Found",b"not found\n");return
     await relay(reader,writer,data,route[:2],route[2])
-
 async def handle(reader,writer):
     try:
         async with INIT_SEM:data=await initial(reader)
@@ -154,9 +138,7 @@ async def handle(reader,writer):
     finally:
         try:writer.close();await writer.wait_closed()
         except Exception:pass
-
 async def main():
     server=await asyncio.start_server(handle,"0.0.0.0",PORT,limit=262144);log.warning("GATEWAY_READY=%s",PORT);log.warning("HTTP_ROUTES=%s",http_routes());log.warning("TLS_ROUTES=%s",tls_routes())
     async with server:await server.serve_forever()
-
 if __name__=="__main__":asyncio.run(main())
