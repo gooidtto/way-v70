@@ -4,24 +4,25 @@ umask 077
 BUILD_ID="way-v70-standard-core"; SOURCE_BUILD="way-v70-standard-core"
 D="${RAILWAY_VOLUME_MOUNT_PATH:-${DATA_DIR:-/data}}"; C="${XRAY_CONFIG:-${D}/config.json}"; mkdir -p "$D" "$(dirname "$C")"
 secret(){ f="$1";v="$2";t="$f.tmp";printf '%s\n' "$v">"$t";chmod 600 "$t";mv -f "$t" "$f"; }
-PUBLIC="${RAILWAY_PUBLIC_DOMAIN:-}"; TCP_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-}"; TCP_PORT="${RAILWAY_TCP_PROXY_PORT:-}"; APP_PORT="${RAILWAY_TCP_APPLICATION_PORT:-}"
+PUBLIC="${RAILWAY_PUBLIC_DOMAIN:-}"; TCP_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-}"; TCP_PORT="${RAILWAY_TCP_PROXY_PORT:-}"; TCP_APP_PORT="${RAILWAY_TCP_APPLICATION_PORT:-}"; APP_PORT="${TCP_APP_PORT:-${PORT:-}}"
 [ -n "$PUBLIC" ] || { echo "FATAL: Railway Generate Domain unavailable; enable Public Networking and redeploy" >&2; exit 1; }
 BOOTSTRAP=0
-if [ -z "$TCP_HOST" ] || [ -z "$TCP_PORT" ] || [ -z "$APP_PORT" ]; then BOOTSTRAP=1; echo "RAILWAY_NETWORKING_PENDING=true"; echo "RAILWAY_GENERATE_DOMAIN_DETECTED=$PUBLIC"; echo "RAILWAY_TCP_PROXY_DETECTED=false"; echo "BOOTSTRAP_MODE=node01-only"; fi
+if [ -z "$TCP_HOST" ] || [ -z "$TCP_PORT" ] || [ -z "$TCP_APP_PORT" ]; then BOOTSTRAP=1; echo "RAILWAY_NETWORKING_PENDING=true"; echo "RAILWAY_GENERATE_DOMAIN_DETECTED=$PUBLIC"; echo "RAILWAY_TCP_PROXY_DETECTED=false"; echo "BOOTSTRAP_MODE=node01-only"; fi
 if [ "$BOOTSTRAP" = 0 ]; then
   case "$TCP_PORT" in ''|*[!0-9]*) echo "FATAL: invalid current Railway TCP proxy port" >&2; exit 1;; esac
-  case "$APP_PORT" in ''|*[!0-9]*) echo "FATAL: invalid current Railway TCP application port" >&2; exit 1;; esac
+  case "$TCP_APP_PORT" in ''|*[!0-9]*) echo "FATAL: invalid current Railway TCP application port" >&2; exit 1;; esac
   [ "$TCP_PORT" -ge 1 ] && [ "$TCP_PORT" -le 65535 ] || { echo "FATAL: invalid current Railway TCP proxy port" >&2; exit 1; }
-  [ "$APP_PORT" -ge 1 ] && [ "$APP_PORT" -le 65535 ] || { echo "FATAL: invalid current Railway TCP application port" >&2; exit 1; }
+  [ "$TCP_APP_PORT" -ge 1 ] && [ "$TCP_APP_PORT" -le 65535 ] || { echo "FATAL: invalid current Railway TCP application port" >&2; exit 1; }
 else
-  APP_PORT="${PORT:-}"
   [ -n "$APP_PORT" ] || { echo "FATAL: Railway assigned PORT unavailable during networking bootstrap" >&2; exit 1; }
 fi
+case "$APP_PORT" in ''|*[!0-9]*) echo "FATAL: invalid current Railway application port" >&2; exit 1;; esac
+[ "$APP_PORT" -ge 1 ] && [ "$APP_PORT" -le 65535 ] || { echo "FATAL: invalid current Railway application port" >&2; exit 1; }
 if [ -s "$D/uuid.txt" ]; then UUID=$(tr -d '[:space:]'<"$D/uuid.txt"); else UUID=$(xray uuid); secret "$D/uuid.txt" "$UUID"; fi
 if [ -s "$D/reality_private_key.txt" ] && [ -s "$D/reality_public_key.txt" ]; then PRIV=$(tr -d '[:space:]'<"$D/reality_private_key.txt"); PUB=$(tr -d '[:space:]'<"$D/reality_public_key.txt"); else OUT=$(xray x25519 2>&1); PRIV=$(printf '%s\n' "$OUT"|awk -F': ' '/^PrivateKey/{print $2;exit}'); PUB=$(printf '%s\n' "$OUT"|awk -F': ' '/^Password/{print $2;exit}'); [ -n "$PRIV" ] && [ -n "$PUB" ] || exit 1; secret "$D/reality_private_key.txt" "$PRIV"; secret "$D/reality_public_key.txt" "$PUB"; fi
 if [ -s "$D/subscription_token.txt" ]; then TOKEN=$(tr -d '[:space:]'<"$D/subscription_token.txt"); else TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))'); secret "$D/subscription_token.txt" "$TOKEN"; fi
 CF_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN:-}"; CF_ID="${CLOUDFLARE_TUNNEL_ID:-}"; CF_HOST="${CLOUDFLARE_PUBLIC_HOSTNAME:-}"; CF_ORIGIN="${CLOUDFLARE_ORIGIN_SERVICE:-}"; CF_PORT="${WS_PORT:-}"; CF_PATH="${WS_PATH:-}"
-export DATA_DIR="$D" XRAY_CONFIG="$C" UUID PRIVATE_KEY="$PRIV" PUBLIC_KEY="$PUB" GATEWAY_PORT="$APP_PORT" RAILWAY_PUBLIC_DOMAIN="$PUBLIC" RAILWAY_TCP_PROXY_DOMAIN="$TCP_HOST" RAILWAY_TCP_PROXY_PORT="$TCP_PORT" RAILWAY_TCP_APPLICATION_PORT="$APP_PORT" XHTTP_PATH="${XHTTP_PATH:-/xhttp}" REALITY_RAW_SNI="${REALITY_RAW_SNI:-www.cloudflare.com}" REALITY_RAW_TARGET="${REALITY_RAW_TARGET:-www.cloudflare.com:443}" REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}" REALITY_XHTTP_SNI="${REALITY_XHTTP_SNI:-www.apple.com}" REALITY_XHTTP_TARGET="${REALITY_XHTTP_TARGET:-www.apple.com:443}" CLOUDFLARE_TUNNEL_TOKEN="$CF_TOKEN" CLOUDFLARE_TUNNEL_ID="$CF_ID" CLOUDFLARE_PUBLIC_HOSTNAME="$CF_HOST" CLOUDFLARE_ORIGIN_SERVICE="$CF_ORIGIN" WS_PORT="$CF_PORT" WS_PATH="$CF_PATH"
+export DATA_DIR="$D" XRAY_CONFIG="$C" UUID PRIVATE_KEY="$PRIV" PUBLIC_KEY="$PUB" GATEWAY_PORT="$APP_PORT" RAILWAY_PUBLIC_DOMAIN="$PUBLIC" RAILWAY_TCP_PROXY_DOMAIN="$TCP_HOST" RAILWAY_TCP_PROXY_PORT="$TCP_PORT" RAILWAY_TCP_APPLICATION_PORT="$TCP_APP_PORT" PORT="$APP_PORT" XHTTP_PATH="${XHTTP_PATH:-/xhttp}" REALITY_RAW_SNI="${REALITY_RAW_SNI:-www.cloudflare.com}" REALITY_RAW_TARGET="${REALITY_RAW_TARGET:-www.cloudflare.com:443}" REALITY_FINGERPRINT="${REALITY_FINGERPRINT:-chrome}" REALITY_XHTTP_SNI="${REALITY_XHTTP_SNI:-www.apple.com}" REALITY_XHTTP_TARGET="${REALITY_XHTTP_TARGET:-www.apple.com:443}" CLOUDFLARE_TUNNEL_TOKEN="$CF_TOKEN" CLOUDFLARE_TUNNEL_ID="$CF_ID" CLOUDFLARE_PUBLIC_HOSTNAME="$CF_HOST" CLOUDFLARE_ORIGIN_SERVICE="$CF_ORIGIN" WS_PORT="$CF_PORT" WS_PATH="$CF_PATH"
 python3 /opt/xray/scripts/generate.py
 R="$D/runtime.json"; [ -s "$R" ] || exit 1
 python3 - "$C" "$D/subscription.txt" "$UUID" "$R" "$PUBLIC" "$TCP_HOST" "$TCP_PORT" <<'PY'
@@ -57,15 +58,12 @@ import json,sys;print('1' if json.load(open(sys.argv[1]))['cloudflare']['enabled
 PY
 )
 python3 /opt/xray/scripts/gateway.py & GP=$!; waitp "$APP_PORT" gateway
-if [ "$CF" = 1 ]; then CFPPORT=$(python3 - "$R" <<'PY'
-import json,sys;print(json.load(open(sys.argv[1]))['cloudflare']['ws_port'])
-PY
-); secret "$D/cloudflare_tunnel_token.txt" "$CF_TOKEN"; cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:2000 run --token-file "$D/cloudflare_tunnel_token.txt" >"$D/cloudflared.log" 2>&1 & CFP=$!; sleep 1; kill -0 "$CFP" 2>/dev/null || { tail -n 80 "$D/cloudflared.log" >&2 || true; exit 1; }; fi
+if [ "$CF" = 1 ]; then secret "$D/cloudflare_tunnel_token.txt" "$CF_TOKEN"; cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:2000 run --token-file "$D/cloudflare_tunnel_token.txt" >"$D/cloudflared.log" 2>&1 & CFP=$!; sleep 1; kill -0 "$CFP" 2>/dev/null || { tail -n 80 "$D/cloudflared.log" >&2 || true; exit 1; }; fi
 printf 'https://%s/sub/%s\n' "$PUBLIC" "$TOKEN">"$D/subscription_url.txt";chmod 600 "$D/subscription_url.txt"
 N=$(python3 - "$R" <<'PY'
 import json,sys;print(json.load(open(sys.argv[1]))['nodes']['count'])
 PY
 )
-echo "SOURCE_REPOSITORY=gooidtto/way-v70";echo "SOURCE_BRANCH=main";echo "RELEASE=$BUILD_ID";echo "SOURCE_BUILD=$SOURCE_BUILD";echo "RAILWAY_CURRENT_PUBLIC=$PUBLIC";echo "RAILWAY_CURRENT_TCP=${TCP_HOST:-pending}:${TCP_PORT:-pending}";echo "RAILWAY_CURRENT_APP_PORT=$APP_PORT";echo "TOPOLOGY=$N";echo "NODE4_ENABLED=$( [ "$CF" = 1 ] && echo true || echo false )";echo "CLOUDFLARE=$( [ "$CF" = 1 ] && echo enabled || echo disabled )";echo "SUBSCRIPTION_COUNT=$N";echo "TOPOLOGY_INVARIANT=OK";echo "RAILWAY_NETWORKING_SOURCE=current-deployment-environment";echo "NODE_ORDER=01:RAILWAY_XHTTP$( [ "$BOOTSTRAP" = 1 ] && echo '' || echo ',02:RAW_REALITY,03:XHTTP_REALITY'$( [ "$CF" = 1 ] && echo ',04:CLOUDFLARE_WS' || true ) )"
+echo "SOURCE_REPOSITORY=gooidtto/way-v70";echo "SOURCE_BRANCH=main";echo "RELEASE=$BUILD_ID";echo "SOURCE_BUILD=$SOURCE_BUILD";echo "RAILWAY_NETWORKING_SOURCE=current-deployment-environment";echo "RAILWAY_CURRENT_PUBLIC=$PUBLIC";echo "RAILWAY_CURRENT_TCP=${TCP_HOST:-pending}:${TCP_PORT:-pending}";echo "RAILWAY_CURRENT_APP_PORT=$APP_PORT";echo "TOPOLOGY=$N";echo "NODE4_ENABLED=$( [ "$CF" = 1 ] && echo true || echo false )";echo "CLOUDFLARE=$( [ "$CF" = 1 ] && echo enabled || echo disabled )";echo "SUBSCRIPTION_COUNT=$N";echo "TOPOLOGY_INVARIANT=OK";echo "NODE_ORDER=01:RAILWAY_XHTTP$( [ "$BOOTSTRAP" = 1 ] && echo '' || echo ',02:RAW_REALITY,03:XHTTP_REALITY'$( [ "$CF" = 1 ] && echo ',04:CLOUDFLARE_WS' || true ) )"
 while kill -0 "$XP" 2>/dev/null && kill -0 "$GP" 2>/dev/null; do if [ "$CF" = 1 ]; then kill -0 "$CFP" 2>/dev/null || exit 1; fi; sleep 5; done
 exit 1
