@@ -34,12 +34,12 @@ if not XPATH.startswith("/"): raise SystemExit("FATAL: XHTTP_PATH must start wit
 CF_NAMES=("CLOUDFLARE_TUNNEL_TOKEN","CLOUDFLARE_TUNNEL_ID","CLOUDFLARE_PUBLIC_HOSTNAME","CLOUDFLARE_ORIGIN_SERVICE","WS_PORT","WS_PATH")
 CF={name:env(name) for name in CF_NAMES}
 CF_CONFIGURED=any(CF.values())
-CF_ENABLED=all(CF.values())
+CF_ENABLED=False
 CF_STATIC_VALID=False
 CF_GATE_REASON="disabled"
-if CF_CONFIGURED and not CF_ENABLED:
+if CF_CONFIGURED and not all(CF.values()):
     CF_GATE_REASON="incomplete-variables"
-elif CF_ENABLED:
+elif all(CF.values()):
     try:
         CF_PORT=int(CF["WS_PORT"])
     except ValueError:
@@ -48,14 +48,15 @@ elif CF_ENABLED:
     else:
         valid_port=1<=CF_PORT<=65535 and CF_PORT not in (APP_PORT,10086,10087,10088)
         valid_host=bool(re.fullmatch(r"[A-Za-z0-9.-]+",CF["CLOUDFLARE_PUBLIC_HOSTNAME"]))
-        valid_origin=bool(CF["CLOUDFLARE_ORIGIN_SERVICE"])
+        valid_origin=bool(re.fullmatch(r"https?://[^\s]+|[^\s]+",CF["CLOUDFLARE_ORIGIN_SERVICE"]))
         valid_path=CF["WS_PATH"].startswith("/")
         CF_STATIC_VALID=valid_port and valid_host and valid_origin and valid_path
+        CF_ENABLED=CF_STATIC_VALID
         CF_GATE_REASON="candidate" if CF_STATIC_VALID else "invalid-variables"
 else:
     CF_PORT=None
 
-# NODE4_FORCE_DISABLED is used only by start.sh after the runtime Cloudflare gate fails.
+# start.sh sets this only after the runtime Cloudflare gate fails.
 if env("NODE4_FORCE_DISABLED") == "1":
     CF_ENABLED=False
     CF_GATE_REASON="runtime-gate-failed"
