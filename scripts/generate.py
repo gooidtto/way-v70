@@ -5,13 +5,11 @@ D=Path(os.environ.get("DATA_DIR","/data"));D.mkdir(parents=True,exist_ok=True);C
 UUID=os.environ["UUID"].strip();PRIV=os.environ["PRIVATE_KEY"].strip();PUB=os.environ["PUBLIC_KEY"].strip()
 PUBLIC=(os.environ.get("RAILWAY_PUBLIC_DOMAIN") or "").strip().lower().rstrip(".")
 TCP_HOST=(os.environ.get("RAILWAY_TCP_PROXY_DOMAIN") or "").strip().lower().rstrip(".")
-TCP_PORT_RAW=(os.environ.get("RAILWAY_TCP_PROXY_PORT") or "").strip()
-APP_PORT_RAW=(os.environ.get("RAILWAY_TCP_APPLICATION_PORT") or "").strip()
+TCP_PORT_RAW=(os.environ.get("RAILWAY_TCP_PROXY_PORT") or "").strip();APP_PORT_RAW=(os.environ.get("RAILWAY_TCP_APPLICATION_PORT") or "").strip()
 if not PUBLIC or not TCP_HOST or not TCP_PORT_RAW or not APP_PORT_RAW: raise SystemExit("FATAL: current Railway Public Networking/TCP Proxy values unavailable")
 try: TCP_PORT=int(TCP_PORT_RAW);APP_PORT=int(APP_PORT_RAW)
 except ValueError: raise SystemExit("FATAL: current Railway Networking port is invalid")
 if not 1<=TCP_PORT<=65535 or not 1<=APP_PORT<=65535: raise SystemExit("FATAL: current Railway Networking port is out of range")
-
 def env(name,default=""): return (os.environ.get(name) or default).strip()
 FP=env("REALITY_FINGERPRINT","chrome");RAW_SNI=env("REALITY_RAW_SNI","www.cloudflare.com").lower().rstrip(".");XHTTP_SNI=env("REALITY_XHTTP_SNI","www.apple.com").lower().rstrip(".");RAW_TARGET=env("REALITY_RAW_TARGET","www.cloudflare.com:443");XHTTP_TARGET=env("REALITY_XHTTP_TARGET","www.apple.com:443");XPATH=env("XHTTP_PATH","/xhttp")
 if not XPATH.startswith("/"): raise SystemExit("FATAL: XHTTP_PATH must start with /")
@@ -31,7 +29,7 @@ ids=[str(x) for x in ids if re.fullmatch(r"[0-9a-fA-F]{2,32}",str(x))]
 while len(ids)<2: ids.append(secrets.token_hex(6))
 ids=ids[:2];sid_file.write_text(json.dumps(ids,indent=2)+"\n")
 def inbound(tag,port,network,security="none",sni=None,target=None,sid=None,flow=None,path=None):
-    client={"id":UUID,"level":0};
+    client={"id":UUID,"level":0}
     if flow: client["flow"]=flow
     stream={"network":network,"security":security}
     if security=="reality": stream["realitySettings"]={"show":False,"target":target,"serverNames":[sni],"privateKey":PRIV,"shortIds":[sid]}
@@ -45,9 +43,9 @@ def q(params): return urllib.parse.urlencode({k:str(v) for k,v in params.items()
 def link(host,port,params,name): return f"vless://{UUID}@{host}:{port}?{q(params)}#{urllib.parse.quote(name,safe='')}"
 lines=[link(PUBLIC,443,{"encryption":"none","security":"tls","sni":PUBLIC,"fp":FP,"alpn":"h2,http/1.1","type":"xhttp","path":XPATH,"mode":"auto"},"Node 01 · Railway XHTTP TLS"),link(TCP_HOST,TCP_PORT,{"encryption":"none","flow":"xtls-rprx-vision","security":"reality","sni":RAW_SNI,"fp":FP,"pbk":PUB,"sid":ids[0],"type":"tcp"},"Node 02 · REALITY Vision · Railway TCP"),link(TCP_HOST,TCP_PORT,{"encryption":"none","security":"reality","sni":XHTTP_SNI,"fp":FP,"alpn":"h2","pbk":PUB,"sid":ids[1],"type":"xhttp","path":XPATH,"mode":"auto"},"Node 03 · XHTTP REALITY · Railway TCP")]
 if CF_ENABLED: lines.append(link(CF["CLOUDFLARE_PUBLIC_HOSTNAME"],443,{"encryption":"none","security":"tls","sni":CF["CLOUDFLARE_PUBLIC_HOSTNAME"],"fp":FP,"alpn":"http/1.1","type":"ws","host":CF["CLOUDFLARE_PUBLIC_HOSTNAME"],"path":CF["WS_PATH"]},"Node 04 · Cloudflare WS TLS"))
-count=len(lines);routes={"node01":{"path":XPATH,"port":10086},"node02":{"sni":RAW_SNI,"port":10087,"short_id":ids[0]},"node03":{"sni":XHTTP_SNI,"port":10088,"short_id":ids[1}}
+count=len(lines);routes={"node01":{"path":XPATH,"port":10086},"node02":{"sni":RAW_SNI,"port":10087,"short_id":ids[0]},"node03":{"sni":XHTTP_SNI,"port":10088,"short_id":ids[1]}}
 if CF_ENABLED: routes["node04"]={"host":CF["CLOUDFLARE_PUBLIC_HOSTNAME"],"path":CF["WS_PATH"],"port":CF_PORT}
-dist={"01":"domain-xhttp-tls","02":"raw-reality-vision","03":"xhttp-reality"};
+dist={"01":"domain-xhttp-tls","02":"raw-reality-vision","03":"xhttp-reality"}
 if CF_ENABLED: dist["04"]="cloudflare-ws-tls"
 runtime={"schema":31,"build":"way-v70-standard-core","architecture":"standard-three-node-core-plus-optional-node4","nodes":{"count":count,"distribution":dist},"application_port":APP_PORT,"public_domain":PUBLIC,"tcp_proxy":{"domain":TCP_HOST,"port":TCP_PORT,"application_port":APP_PORT},"railway_networking":{"source":"current-deployment-environment","authoritative":True,"subscription_source":"current-runtime-values","public_domain":"RAILWAY_PUBLIC_DOMAIN","tcp_proxy_domain":"RAILWAY_TCP_PROXY_DOMAIN","tcp_proxy_port":"RAILWAY_TCP_PROXY_PORT","tcp_application_port":"RAILWAY_TCP_APPLICATION_PORT"},"cloudflare":{"enabled":CF_ENABLED,"public_hostname":CF["CLOUDFLARE_PUBLIC_HOSTNAME"] if CF_ENABLED else "","ws_port":CF_PORT if CF_ENABLED else None,"ws_path":CF["WS_PATH"] if CF_ENABLED else ""},"routes":routes}
 runtime["fingerprint"]=hashlib.sha256(json.dumps(runtime,sort_keys=True,separators=(",",":")).encode()).hexdigest()
