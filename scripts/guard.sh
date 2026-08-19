@@ -5,10 +5,13 @@ TCP_HOST="${RAILWAY_TCP_PROXY_DOMAIN:-}"
 TCP_PORT="${RAILWAY_TCP_PROXY_PORT:-}"
 TCP_APP_PORT="${RAILWAY_TCP_APPLICATION_PORT:-}"
 APP_PORT="${TCP_APP_PORT:-${PORT:-}}"
-[ -n "$PUBLIC_DOMAIN" ] || { echo "FATAL: RAILWAY_PUBLIC_DOMAIN unavailable; enable Public Networking and redeploy" >&2; exit 1; }
+BUILD_FILE=/opt/xray/BUILD_VERSION
+[ -s "$BUILD_FILE" ] || { echo "FATAL: canonical build marker missing" >&2; exit 1; }
 echo "SOURCE_REPOSITORY=gooidtto/way-v70"
 echo "SOURCE_BRANCH=main"
 echo "SOURCE_BUILD=way-v70-standard-core"
+echo "BUILD_MARKER=$(tr '\n' ' ' < "$BUILD_FILE" | sed 's/[[:space:]]\+/ /g')"
+[ -n "$PUBLIC_DOMAIN" ] || { echo "FATAL: RAILWAY_PUBLIC_DOMAIN unavailable; enable Public Networking and redeploy" >&2; exit 1; }
 echo "RAILWAY_NETWORKING_SOURCE=current-deployment-environment"
 echo "RAILWAY_GENERATE_DOMAIN=$PUBLIC_DOMAIN"
 if [ -n "$TCP_HOST" ] && [ -n "$TCP_PORT" ] && [ -n "$TCP_APP_PORT" ]; then
